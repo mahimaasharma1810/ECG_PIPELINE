@@ -1,0 +1,22 @@
+# Raw datasets — redistributable via the download commands in README.md,
+# far too large for git (icentia11k alone is ~257GB).
+data/
+
+# Local Claude Code tool settings/session data, not project source.
+.claude/
+
+# Stale archive, not source.
+ecg_pipeline_with_medgemma.zip
+
+# Detailed historical docs kept locally for reference, not part of the
+# handover README.
+Docs/archive/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# OS
+.DS_Store

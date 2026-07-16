@@ -1,0 +1,3 @@
+[submodule "MedGemma-Agent"]
+	path = MedGemma-Agent
+	url = https://github.com/saranambiar/MedGemma-Agent.git

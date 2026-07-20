@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import json
 import sys
 import time
 import xml.etree.ElementTree as ET
@@ -1221,6 +1222,638 @@ def main_eval_classifier(argv=None):
 
 
 # ============================================================================
+# train_twostage.py — CLI: two-stage classifier (Stage 1 gate + Stage 2 S/V/F)
+# ============================================================================
+_TRAIN_TWOSTAGE_DOC = """CLI: train and evaluate the two-stage classifier proposed in
+ABLATION_REPORT.md's feature-family ablation (GREEN LIGHT result).
+
+Stage 1 (gate): binary Normal-vs-Abnormal, morphology + timing (63-dim) --
+timing is a genuinely useful "is this beat premature/ectopic" signal for
+this binary decision (the discarded flat-model timing experiments showed
+timing hurts S/V *discrimination*, but that failure mode is now entirely
+Stage 2's problem -- Stage 1 never has to tell S from V, only
+normal from not-normal).
+
+Stage 2 (discriminator): S vs V vs F among whatever Stage 1 flags as
+Abnormal, morphology-only (56-dim) -- this is Model A from the
+feature-family ablation, already shown to separate S/V well
+(S->V rate 0.169, V F1 0.866 on DS2).
+
+Both stages reuse FiveClassBeatClassifier unmodified -- it fits on
+`sorted(set(y))`, so it already works as a 2-class or 3-class model, not
+just 5-class. No new classifier class needed (AGENT_RULES.md rule 7 spirit:
+don't build new abstractions the existing ones already cover).
+
+Stage 1's decision threshold is tuned on DS1_VAL (patient-level,
+tuning-only split -- never DS2, per AGENT_RULES.md rule 1) via a sweep,
+defaulting to the Youden's-J-maximizing point (sensitivity + specificity -
+1), a standard non-arbitrary screening-gate criterion.
+
+Usage:
+    python -m ecg_pipeline.ecg_pipeline_tools train-twostage \
+        --out-prefix models/five_class_xgb_twostage_v1
+"""
+
+# Reference floors, derived from the pinned baseline's DS2 confusion matrix
+# (ABLATION_REPORT.md "Prerequisite 1") -- what an implicit "not predicted N"
+# gate would already achieve with the flat model, without any Stage 1 at all:
+#   true abnormal (S+V+F) = 1795+3005+363 = 5163; predicted N among these =
+#   1212(S->N)+148(V->N)+97(F->N) = 1457 -> non-N rate = 3706/5163 = 0.7178
+#   true S = 1795; S->N = 1212 -> S non-N rate = 583/1795 = 0.3248
+_FLAT_MODEL_ABNORMAL_GATE_FLOOR = 0.7178
+_FLAT_MODEL_S_GATE_FLOOR = 0.3248
+
+# Trivial-margin V-precision floor for Experiment A's threshold sweep (v1/v2
+# result: v1's threshold=0.05 leaked 8.2% of N past the gate, collapsing V
+# precision 0.828->0.655; v2 fixed V by giving Stage 2 an N-escape-hatch but
+# that undid Stage 1's S gain instead -- see ABLATION_REPORT.md). Same 0.02
+# trivial-margin convention as the rest of this file's Rule-8 checks.
+_V_PRECISION_FLOOR = 0.828 - 0.02
+
+# Best two-stage result so far (v1: Stage 2 = S/V/F-only, threshold=0.05) --
+# used by the auto-verdict below so a new run is judged against the best
+# already-demonstrated two-stage result, not just the flat baseline. v2's
+# auto-verdict compared only to the flat baseline and mislabeled a wash (S
+# gain gone, V fixed) as "promotable CANDIDATE" -- see ABLATION_REPORT.md's
+# two-stage v2 section for the correction. Update this dict by hand whenever
+# a new run actually beats it.
+_BEST_PRIOR_TWOSTAGE = {"label": "v1 (Stage 2 = S/V/F-only, threshold=0.05)",
+                         "s_f1": 0.364, "macro_f1": 0.4218}
+
+
+def _stage1_labels(y: list[str]) -> list[str]:
+    return ["N" if lab == "N" else "Abnormal" for lab in y]
+
+
+def _fit_balanced(X: np.ndarray, y: list[str], seed: int, ros: bool = True,
+                   balanced_weights: bool = True,
+                   class_weight_multiplier: dict[str, float] | None = None) -> FiveClassBeatClassifier:
+    print(f"  class counts before ROS: {dict(Counter(y))}")
+    if ros:
+        X_ros, y_ros, _ = random_oversample(X, y, minority_ratio=1.0 / 3.0, seed=seed)
+        print(f"  class counts after ROS (1:3 floor): {dict(Counter(y_ros))}")
+    else:
+        X_ros, y_ros = X, y
+
+    sample_weight = (compute_sample_weight("balanced", y_ros) if balanced_weights
+                      else np.ones(len(y_ros), dtype=float))
+
+    clf = FiveClassBeatClassifier()
+    clf.fit(X_ros, y_ros, sample_weight=sample_weight, random_state=seed,
+            class_weight_multiplier=class_weight_multiplier)
+    return clf
+
+
+def _stage1_abnormal_proba(clf: FiveClassBeatClassifier, X: np.ndarray) -> np.ndarray:
+    proba = clf.model.predict_proba(X)
+    classes = list(clf._label_encoder.inverse_transform(np.arange(proba.shape[1])))
+    return proba[:, classes.index("Abnormal")]
+
+
+def tune_stage1_threshold(clf: FiveClassBeatClassifier, X_val: np.ndarray, y_val: list[str]) -> dict:
+    """Sweeps threshold 0.05-0.95, reports abnormal/S/V/F recall and N
+    specificity at each point, picks the Youden's-J-maximizing threshold as
+    the default reported operating point. DS1_VAL only -- never DS2
+    (AGENT_RULES.md rule 1)."""
+    y_val_arr = np.array(y_val)
+    abnormal_proba = _stage1_abnormal_proba(clf, X_val)
+
+    n_mask, s_mask, v_mask, f_mask = (y_val_arr == "N", y_val_arr == "S",
+                                       y_val_arr == "V", y_val_arr == "F")
+    abn_mask = y_val_arr != "N"
+
+    sweep = []
+    best_j, best_threshold = -1.0, 0.5
+    print(f"\n{'thresh':<8}{'abn_recall':<12}{'S_recall':<10}{'V_recall':<10}{'F_recall':<10}{'N_specificity':<14}")
+    for threshold in np.arange(0.05, 1.0, 0.05):
+        threshold = float(threshold)
+        predicted_abnormal = abnormal_proba >= threshold
+        abn_recall = float((predicted_abnormal & abn_mask).sum() / abn_mask.sum()) if abn_mask.any() else 0.0
+        s_recall = float((predicted_abnormal & s_mask).sum() / s_mask.sum()) if s_mask.any() else 0.0
+        v_recall = float((predicted_abnormal & v_mask).sum() / v_mask.sum()) if v_mask.any() else 0.0
+        f_recall = float((predicted_abnormal & f_mask).sum() / f_mask.sum()) if f_mask.any() else 0.0
+        n_specificity = float((~predicted_abnormal & n_mask).sum() / n_mask.sum()) if n_mask.any() else 0.0
+        j = abn_recall + n_specificity - 1.0
+        sweep.append({"threshold": round(threshold, 2), "abnormal_recall": abn_recall, "s_recall": s_recall,
+                       "v_recall": v_recall, "f_recall": f_recall, "n_specificity": n_specificity,
+                       "youden_j": j})
+        print(f"{threshold:<8.2f}{abn_recall:<12.3f}{s_recall:<10.3f}{v_recall:<10.3f}{f_recall:<10.3f}{n_specificity:<14.3f}")
+        if j > best_j:
+            best_j, best_threshold = j, threshold
+
+    print(f"\nSelected threshold (Youden's J maximizing, DS1_VAL): {best_threshold:.2f}  (J={best_j:.3f})")
+    return {"threshold": best_threshold, "sweep": sweep}
+
+
+def chained_eval(stage1: FiveClassBeatClassifier, stage2: FiveClassBeatClassifier,
+                  X_63: np.ndarray, y_true: list[str], threshold: float,
+                  n_features: int = N_FEATURES,
+                  append_stage1_proba_to_stage2: bool = False) -> dict:
+    """One Stage1->Stage2 chained pass. Generic over whatever classes Stage 2
+    knows (S/V/F-only, per v1/Experiment A, or N/S/V/F, per v2/Fix 1) --
+    beats gated Normal by Stage 1 are predicted N directly; beats gated
+    Abnormal are handed to Stage 2, whose own predicted classes (whatever
+    they are) become the final label.
+
+    `append_stage1_proba_to_stage2` (EXPERIMENT B): appends Stage 1's own
+    P(abnormal) for each beat as an extra Stage-2 input column, alongside
+    the `n_features` morphology columns -- reuses `abnormal_proba` (already
+    computed here for the gate decision) rather than recomputing it. At eval
+    time this is always the real, fully-trained Stage 1's output (DS1_VAL
+    and DS2 are both genuinely held-out from Stage 1's training, so there is
+    no leakage concern here -- only Stage 2's TRAINING data needs the
+    out-of-fold treatment, done separately by `cross_fit_stage1_proba`)."""
+    y_true_arr = np.array(y_true)
+    abnormal_proba = _stage1_abnormal_proba(stage1, X_63)
+    predicted_abnormal = abnormal_proba >= threshold
+    y_pred = np.full(len(y_true), "N", dtype=object)
+    if predicted_abnormal.any():
+        X_stage2_input = X_63[predicted_abnormal][:, :n_features]
+        if append_stage1_proba_to_stage2:
+            X_stage2_input = np.hstack([X_stage2_input, abnormal_proba[predicted_abnormal].reshape(-1, 1)])
+        proba2 = stage2.model.predict_proba(X_stage2_input)
+        classes2 = stage2._label_encoder.inverse_transform(np.arange(proba2.shape[1]))
+        y_pred[predicted_abnormal] = classes2[np.argmax(proba2, axis=1)]
+    y_pred = y_pred.tolist()
+
+    metrics = per_class_metrics(y_true, y_pred)
+    macro_f1 = f1_score(y_true, y_pred, labels=AAMI_CLASSES, average="macro", zero_division=0)
+    cm = confusion_matrix(y_true, y_pred, labels=AAMI_CLASSES)
+    n_idx, s_idx = AAMI_CLASSES.index("N"), AAMI_CLASSES.index("S")
+    s_support = cm[s_idx].sum()
+    s_to_n_rate = float(cm[s_idx, n_idx] / s_support) if s_support else 0.0
+    return {"metrics": metrics, "macro_f1": macro_f1, "confusion_matrix": cm,
+            "s_to_n_rate": s_to_n_rate, "y_pred": y_pred}
+
+
+def sweep_chained_threshold(stage1: FiveClassBeatClassifier, stage2: FiveClassBeatClassifier,
+                             X_eval_63: np.ndarray, y_eval: list[str],
+                             v_precision_floor: float = _V_PRECISION_FLOOR,
+                             append_stage1_proba_to_stage2: bool = False) -> dict:
+    """EXPERIMENT A: sweeps Stage 1's threshold and scores each point by the
+    CHAINED (Stage1->Stage2) macro-F1, not Stage-1-only Youden's J -- Youden's
+    J is blind to what a leaked-N false positive does once it reaches Stage 2
+    (that blindness is exactly what let v1's threshold=0.05 through with an
+    undetected V-precision collapse). Must be run on a tuning split
+    (DS1_VAL), never DS2 -- AGENT_RULES.md rule 1 -- so this function takes
+    whatever eval set the caller passes and does not itself enforce which
+    one; main_train_twostage always calls it with DS1_VAL.
+    Picks the macro-F1-maximizing threshold AMONG those meeting the
+    V-precision floor; if none meet the floor, returns chosen_threshold=None
+    so the caller can report "no sweet spot found" honestly instead of
+    silently picking a floor-violating point."""
+    rows = []
+    best_macro_f1, best_threshold = -1.0, None
+    print(f"\n{'thresh':<8}{'S_f1':<8}{'S_recall':<10}{'S->N':<8}{'V_prec':<9}{'V_f1':<8}{'N_f1':<8}{'macro_f1':<10}{'meets_V_floor':<14}")
+    for threshold in np.arange(0.05, 1.0, 0.05):
+        threshold = float(threshold)
+        result = chained_eval(stage1, stage2, X_eval_63, y_eval, threshold,
+                               append_stage1_proba_to_stage2=append_stage1_proba_to_stage2)
+        m = result["metrics"]
+        meets_floor = bool(m["V"]["precision"] >= v_precision_floor)
+        row = {"threshold": round(threshold, 2), "s_f1": m["S"]["f1"], "s_recall": m["S"]["sensitivity"],
+               "s_to_n_rate": result["s_to_n_rate"], "v_precision": m["V"]["precision"], "v_f1": m["V"]["f1"],
+               "n_f1": m["N"]["f1"], "macro_f1": result["macro_f1"], "meets_v_floor": meets_floor}
+        rows.append(row)
+        print(f"{threshold:<8.2f}{m['S']['f1']:<8.3f}{m['S']['sensitivity']:<10.3f}{result['s_to_n_rate']:<8.3f}"
+              f"{m['V']['precision']:<9.3f}{m['V']['f1']:<8.3f}{m['N']['f1']:<8.3f}{result['macro_f1']:<10.4f}"
+              f"{'yes' if meets_floor else 'NO':<14}")
+        if meets_floor and result["macro_f1"] > best_macro_f1:
+            best_macro_f1, best_threshold = result["macro_f1"], threshold
+
+    if best_threshold is None:
+        print(f"\nNo threshold in the sweep meets the V-precision floor ({v_precision_floor:.3f}). "
+              "No sweet spot found -- Experiment B territory.")
+    else:
+        print(f"\nSelected threshold (max chained macro-F1 subject to V-precision >= "
+              f"{v_precision_floor:.3f}, DS1_VAL): {best_threshold:.2f}  (macro-F1={best_macro_f1:.4f})")
+    return {"threshold": best_threshold, "sweep": rows}
+
+
+def _build_dataset_with_fold_ids(record_specs: list[tuple[Path, object]], n_folds: int,
+                                  seed: int) -> tuple[np.ndarray, list[str], np.ndarray]:
+    """EXPERIMENT B: same per-record beat extraction as build_dataset (63-dim,
+    timing included), but additionally tags each output row with a fold id
+    (0..n_folds-1). Fold assignment is per RECORD, not per beat, so a single
+    recording's beats never split across the train/held-out boundary of a
+    fold -- a recording's beats are highly correlated (same patient, same
+    device, same noise characteristics), so per-beat fold assignment would
+    leak across folds in a way per-record assignment does not, mirroring why
+    DS1_TRAIN/DS1_VAL/DS2 are patient-level splits in the first place."""
+    rng = np.random.default_rng(seed)
+    order = rng.permutation(len(record_specs))
+    fold_of_record = np.empty(len(record_specs), dtype=int)
+    for rank, record_idx in enumerate(order):
+        fold_of_record[record_idx] = rank % n_folds
+
+    X_parts, y_parts, fold_parts = [], [], []
+    for i, (db_dir, rid) in enumerate(record_specs):
+        record_path = db_dir / str(rid)
+        if not record_path.with_suffix(".hea").exists():
+            print(f"  skip {rid}: not downloaded")
+            continue
+        if not record_path.with_suffix(".atr").exists():
+            print(f"  skip {rid}: no .atr (expert) annotations available")
+            continue
+        X_r, y_r = _load_record_beats(record_path, include_timing=True)
+        print(f"  {rid}: {len(y_r)} labeled beats (fold {fold_of_record[i]})")
+        if len(y_r) == 0:
+            continue
+        X_parts.append(X_r)
+        y_parts.extend(y_r)
+        fold_parts.extend([int(fold_of_record[i])] * len(y_r))
+
+    X = np.vstack(X_parts) if X_parts else np.zeros((0, _feature_width(True)))
+    return X, y_parts, np.array(fold_parts)
+
+
+def cross_fit_stage1_proba(X_train: np.ndarray, y_train: list[str], fold_id: np.ndarray,
+                            seed: int) -> np.ndarray:
+    """EXPERIMENT B: out-of-fold Stage-1 P(abnormal) for every training beat,
+    used as an extra Stage-2 input feature. Each fold's beats are scored by a
+    Stage 1 trained on every OTHER fold only -- Stage 1 never predicts on its
+    own training beats here, so this feature can't leak Stage 1's
+    memorization of a beat's own label into Stage 2's training signal (the
+    real, fully-trained Stage 1 is still what gets deployed and evaluated;
+    this cross-fitting only ever touches Stage 2's TRAINING inputs)."""
+    y_stage1_arr = np.array(_stage1_labels(y_train))
+    oof_proba = np.zeros(len(y_train), dtype=float)
+    n_folds = int(fold_id.max()) + 1
+    for k in range(n_folds):
+        held_mask = fold_id == k
+        train_mask = ~held_mask
+        print(f"  cross-fit fold {k + 1}/{n_folds}: training Stage 1 on {int(train_mask.sum())} beats, "
+              f"scoring {int(held_mask.sum())} held-out beats")
+        fold_stage1 = _fit_balanced(X_train[train_mask], y_stage1_arr[train_mask].tolist(), seed=seed)
+        oof_proba[held_mask] = _stage1_abnormal_proba(fold_stage1, X_train[held_mask])
+    return oof_proba
+
+
+def main_train_twostage(argv=None):
+    parser = argparse.ArgumentParser(description=_TRAIN_TWOSTAGE_DOC)
+    parser.add_argument("--data-root", type=Path, default=DATA_RAW / "public")
+    parser.add_argument("--out-prefix", type=Path, default=MODELS_DIR / "five_class_xgb_twostage_v1")
+    parser.add_argument("--include-svdb", action=argparse.BooleanOptionalAction, default=True,
+                         help="add all 78 SVDB records into training (same as production's recipe)")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--f-weight-multiplier", type=float, default=1.0,
+                         help="extra sample_weight multiplier on F-labeled rows in Stage 2 training")
+    parser.add_argument("--threshold", type=float, default=None,
+                         help="skip DS1_VAL tuning and use this Stage-1 threshold directly")
+    parser.add_argument("--stage2-include-normal", action=argparse.BooleanOptionalAction, default=False,
+                         help="FIX 1 (see ABLATION_REPORT.md two-stage v1 result): train Stage 2 on "
+                              "N/S/V/F instead of S/V/F-only, so a Normal beat that leaks past Stage 1's "
+                              "gate can be recovered as N instead of being FORCED into S/V/F -- v1's "
+                              "root cause for V's precision collapse (0.828->0.655). Default False "
+                              "reproduces v1's S/V/F-only Stage 2 exactly.")
+    parser.add_argument("--threshold-objective", choices=["youden_j", "chained_macro_f1"], default="youden_j",
+                         help="youden_j (default, v1/v2 behavior): tune Stage 1's threshold on its own "
+                              "sensitivity+specificity, blind to what Stage 2 does with a leaked beat. "
+                              "chained_macro_f1 (EXPERIMENT A): tune on the full chained Stage1->Stage2 "
+                              "macro-F1, subject to a hard V-precision floor -- both computed on DS1_VAL, "
+                              "never DS2 (AGENT_RULES.md rule 1).")
+    parser.add_argument("--stage2-use-stage1-proba", action=argparse.BooleanOptionalAction, default=False,
+                         help="EXPERIMENT B: append Stage 1's P(abnormal) as an extra (57th) Stage 2 "
+                              "input feature, alongside the 56 morphology features -- Stage 2 stays "
+                              "S/V/F-only (v1's architecture), no raw timing features added. Training-time "
+                              "values are generated via K-fold cross-fitting (--cv-folds) so Stage 1 "
+                              "never scores its own training beats; eval-time values use the real, "
+                              "fully-trained Stage 1 (DS1_VAL/DS2 are already held out from Stage 1's "
+                              "training, so no cross-fitting is needed there).")
+    parser.add_argument("--cv-folds", type=int, default=5,
+                         help="number of record-level folds for Experiment B's Stage-1 cross-fitting")
+    args = parser.parse_args(argv)
+    if not args.out_prefix.is_absolute():
+        args.out_prefix = (MODELS_DIR.parent / args.out_prefix).resolve()
+
+    db_dir = args.data_root / "mitdb"
+    svdb_dir = args.data_root / "svdb"
+
+    fold_id = None
+    if args.stage2_use_stage1_proba:
+        print("Building DS1_TRAIN(+SVDB) with per-record fold ids (63-dim, EXPERIMENT B cross-fitting) ...")
+        record_specs = [(db_dir, rid) for rid in DS1_TRAIN]
+        if args.include_svdb:
+            record_specs += [(svdb_dir, rid) for rid in SVDB_RECORDS]
+        X_train, y_train, fold_id = _build_dataset_with_fold_ids(record_specs, args.cv_folds, args.seed)
+    else:
+        print("Building DS1_TRAIN (63-dim: 56 morphology/wavelet + 7 timing) ...")
+        X_train, y_train = build_dataset(db_dir, DS1_TRAIN, include_timing=True)
+    print("Building DS1_VAL (patient-level tuning split) ...")
+    X_val, y_val = build_dataset(db_dir, DS1_VAL, include_timing=True)
+    print("Building DS2 (held-out, report-only) ...")
+    X_test, y_test = build_dataset(db_dir, MITDB_DS2, include_timing=True)
+
+    if args.include_svdb and not args.stage2_use_stage1_proba:
+        print("Building SVDB training data (S-class boost) ...")
+        X_svdb, y_svdb = build_dataset(svdb_dir, SVDB_RECORDS, include_timing=True)
+        print(f"  SVDB contributes {len(y_svdb)} beats to training")
+        X_train = np.vstack([X_train, X_svdb])
+        y_train = y_train + y_svdb
+
+    keep = [i for i, lab in enumerate(y_train) if lab != "Q"]
+    print(f"Dropped {len(y_train) - len(keep)} Q-class beats from training (not learnable at this sample size)")
+    X_train = X_train[keep]
+    y_train = [y_train[i] for i in keep]
+    if fold_id is not None:
+        fold_id = fold_id[keep]
+
+    # ---- Stage 1: Normal vs Abnormal, morphology + timing (63-dim) ----
+    print("\n=== Stage 1: Normal-vs-Abnormal gate (63-dim, timing included) ===")
+    y_train_stage1 = _stage1_labels(y_train)
+    stage1 = _fit_balanced(X_train, y_train_stage1, seed=args.seed)
+    stage1_path = Path(f"{args.out_prefix}_stage1.json")
+    stage1.save(stage1_path)
+    print(f"Saved Stage 1 -> {stage1_path}  (seed={args.seed})")
+
+    # ---- EXPERIMENT B: out-of-fold Stage-1 P(abnormal) for Stage 2's TRAINING data only ----
+    oof_abnormal_proba = None
+    if args.stage2_use_stage1_proba:
+        print(f"\n=== EXPERIMENT B: {args.cv_folds}-fold cross-fitting Stage 1 for out-of-fold "
+              "P(abnormal) (Stage 2 training feature only -- the deployed Stage 1 above is untouched) ===")
+        oof_abnormal_proba = cross_fit_stage1_proba(X_train, y_train, fold_id, seed=args.seed)
+
+    # ---- Stage 2: discriminator, morphology-only (56-dim, +1 if Experiment B) ----
+    # Trained BEFORE threshold selection: chained_macro_f1 objective needs a
+    # trained Stage 2 to score each candidate threshold against (that's the
+    # whole point -- Youden's J on Stage 1 alone can't see what Stage 2 does
+    # with a leaked beat).
+    if args.stage2_include_normal:
+        print("\n=== Stage 2: N/S/V/F discriminator (56-dim, morphology-only, FIX 1: N included "
+              "so a leaked Normal beat can be recovered instead of forced into S/V/F) ===")
+        stage2_idx = list(range(len(y_train)))
+    else:
+        print("\n=== Stage 2: S/V/F discriminator (56-dim, morphology-only, true-abnormal beats only"
+              + (", + out-of-fold Stage-1 P(abnormal) as feature 57 -- EXPERIMENT B" if oof_abnormal_proba is not None else "")
+              + ") ===")
+        stage2_idx = [i for i, lab in enumerate(y_train) if lab != "N"]
+    X_train_stage2 = X_train[stage2_idx][:, :N_FEATURES]
+    if oof_abnormal_proba is not None:
+        X_train_stage2 = np.hstack([X_train_stage2, oof_abnormal_proba[stage2_idx].reshape(-1, 1)])
+        print(f"  Stage 2 input is now {X_train_stage2.shape[1]}-dim (56 morphology + 1 out-of-fold "
+              "Stage-1 P(abnormal))")
+    y_train_stage2 = [y_train[i] for i in stage2_idx]
+    f_mult = {"F": args.f_weight_multiplier} if args.f_weight_multiplier != 1.0 else None
+    stage2 = _fit_balanced(X_train_stage2, y_train_stage2, seed=args.seed, class_weight_multiplier=f_mult)
+    stage2_path = Path(f"{args.out_prefix}_stage2.json")
+    stage2.save(stage2_path)
+    print(f"Saved Stage 2 -> {stage2_path}  (seed={args.seed})")
+
+    # ---- Stage 1 threshold selection (DS1_VAL only -- never DS2, AGENT_RULES.md rule 1) ----
+    if args.threshold_objective == "chained_macro_f1":
+        print("\n=== EXPERIMENT A: threshold sweep scored by CHAINED macro-F1 (DS1_VAL) ===")
+        tuning = sweep_chained_threshold(stage1, stage2, X_val, y_val,
+                                          append_stage1_proba_to_stage2=args.stage2_use_stage1_proba)
+        if tuning["threshold"] is None and args.threshold is None:
+            print("Falling back to threshold=0.05 (v1's operating point) since no point in the "
+                  "sweep met the V-precision floor -- report this run as 'no sweet spot found', "
+                  "not as a tuned result.")
+            tuning_threshold = 0.05
+        else:
+            tuning_threshold = tuning["threshold"]
+    else:
+        tuning = tune_stage1_threshold(stage1, X_val, y_val)
+        tuning_threshold = tuning["threshold"]
+    threshold = args.threshold if args.threshold is not None else tuning_threshold
+
+    threshold_path = Path(f"{args.out_prefix}_threshold.json")
+    threshold_path.write_text(json.dumps({"threshold": threshold, "objective": args.threshold_objective,
+                                           "sweep": tuning["sweep"]}, indent=2))
+    print(f"Saved Stage-1 threshold + sweep -> {threshold_path}")
+
+    # ---- Stage-1-in-isolation report on DS2 (diagnostic, not the promotion number) ----
+    print(f"\n=== Stage 1 in isolation on DS2 (threshold={threshold:.2f}) -- diagnostic only ===")
+    y_test_arr = np.array(y_test)
+    abnormal_proba_test = _stage1_abnormal_proba(stage1, X_test)
+    predicted_abnormal_test = abnormal_proba_test >= threshold
+    s_mask_test, v_mask_test, f_mask_test = y_test_arr == "S", y_test_arr == "V", y_test_arr == "F"
+    abn_mask_test = y_test_arr != "N"
+    s_recall_ds2 = float((predicted_abnormal_test & s_mask_test).sum() / s_mask_test.sum()) if s_mask_test.any() else 0.0
+    v_recall_ds2 = float((predicted_abnormal_test & v_mask_test).sum() / v_mask_test.sum()) if v_mask_test.any() else 0.0
+    f_recall_ds2 = float((predicted_abnormal_test & f_mask_test).sum() / f_mask_test.sum()) if f_mask_test.any() else 0.0
+    abn_recall_ds2 = float((predicted_abnormal_test & abn_mask_test).sum() / abn_mask_test.sum()) if abn_mask_test.any() else 0.0
+    print(f"Stage-1-ISOLATED S-recall on DS2:        {s_recall_ds2:.3f}  (flat-model implicit floor: {_FLAT_MODEL_S_GATE_FLOOR:.3f})")
+    print(f"Stage-1-ISOLATED V-recall on DS2:        {v_recall_ds2:.3f}")
+    print(f"Stage-1-ISOLATED F-recall on DS2:        {f_recall_ds2:.3f}")
+    print(f"Stage-1-ISOLATED abnormal-recall on DS2: {abn_recall_ds2:.3f}  (flat-model implicit floor: {_FLAT_MODEL_ABNORMAL_GATE_FLOOR:.3f})")
+    print("(these measure whether Stage 1 GATES the beat as Abnormal -- not the final chained label; "
+          "see chained S-recall below for what the full system actually outputs)")
+
+    if args.stage2_use_stage1_proba:
+        print("\n=== EXPERIMENT B diagnostic: does P(abnormal) separate leaked-N from true-abnormal "
+              "beats reaching Stage 2? (DS2) ===")
+        gated_proba = abnormal_proba_test[predicted_abnormal_test]
+        gated_true = y_test_arr[predicted_abnormal_test]
+        true_abnormal_proba = gated_proba[gated_true != "N"]
+        leaked_n_proba = gated_proba[gated_true == "N"]
+
+        def _qs(x):
+            if len(x) == 0:
+                return "n=0"
+            q = np.percentile(x, [0, 10, 25, 50, 75, 90, 100])
+            return (f"n={len(x)}  min={q[0]:.3f} p10={q[1]:.3f} p25={q[2]:.3f} median={q[3]:.3f} "
+                    f"p75={q[4]:.3f} p90={q[5]:.3f} max={q[6]:.3f}")
+
+        print(f"  True abnormal beats (S/V/F) reaching Stage 2:  {_qs(true_abnormal_proba)}")
+        print(f"  Leaked false-positive N beats reaching Stage 2: {_qs(leaked_n_proba)}")
+        if len(true_abnormal_proba) and len(leaked_n_proba):
+            gap = float(np.median(true_abnormal_proba) - np.median(leaked_n_proba))
+            print(f"  Median gap (true-abnormal minus leaked-N): {gap:+.3f}  "
+                  f"({'separated -- feature carries real signal Stage 2 can exploit' if gap > 0.1 else 'heavily overlapping -- feature likely a wash'})")
+
+    # ---- Chained end-to-end (Stage 1 -> Stage 2) prediction on DS2 ----
+    print("\n=== Chained end-to-end (Stage 1 -> Stage 2) DS2 report -- the number that matters ===")
+    result = chained_eval(stage1, stage2, X_test, y_test, threshold,
+                           append_stage1_proba_to_stage2=args.stage2_use_stage1_proba)
+    metrics, macro_f1, cm = result["metrics"], result["macro_f1"], result["confusion_matrix"]
+    overall_acc = float(np.mean(np.array(result["y_pred"]) == y_test_arr))
+
+    print(f"{'class':<6}{'sensitivity':<13}{'precision':<12}{'f1':<8}{'support':<8}")
+    for c in AAMI_CLASSES:
+        m = metrics[c]
+        print(f"{c:<6}{m['sensitivity']:<13.3f}{m['precision']:<12.3f}{m['f1']:<8.3f}{m['support']:<8}")
+    print(f"Macro-F1: {macro_f1:.4f}   Overall accuracy: {overall_acc:.4f}  (not the success metric)")
+    print(f"\nConfusion matrix (rows=true, cols=pred), order {AAMI_CLASSES}:")
+    print(cm)
+
+    n_idx, s_idx, v_idx = AAMI_CLASSES.index("N"), AAMI_CLASSES.index("S"), AAMI_CLASSES.index("V")
+    s_support, v_support = cm[s_idx].sum(), cm[v_idx].sum()
+    s_to_n_rate = result["s_to_n_rate"]
+    s_to_v_rate = cm[s_idx, v_idx] / s_support if s_support else 0.0
+    v_to_s_rate = cm[v_idx, s_idx] / v_support if v_support else 0.0
+    print(f"S->N misclassification rate: {s_to_n_rate:.3f} ({cm[s_idx, n_idx]}/{s_support} true S beats predicted N)")
+    print(f"S->V misclassification rate: {s_to_v_rate:.3f} ({cm[s_idx, v_idx]}/{s_support} true S beats predicted V)")
+    print(f"V->S misclassification rate: {v_to_s_rate:.3f} ({cm[v_idx, s_idx]}/{v_support} true V beats predicted S)")
+
+    # ---- Comparison vs the pinned baseline (ABLATION_REPORT.md "Prerequisite 1") ----
+    baseline_ds2 = {"N": 0.966, "S": 0.160, "V": 0.866, "F": 0.021, "Q": 0.000}
+    baseline_macro_f1 = 0.4026
+    baseline_s_to_n, baseline_s_to_v, baseline_v_to_s = 0.676, 0.169, 0.041
+    baseline_v_precision = 0.828  # the number two-stage v1 broke (0.828 -> 0.655)
+    print("\n=== vs pinned baseline (ABLATION_REPORT.md Prerequisite 1) ===")
+    v_regressed, n_regressed = False, False
+    for c in AAMI_CLASSES:
+        delta = metrics[c]["f1"] - baseline_ds2[c]
+        flag = ""
+        if c in ("V", "N") and delta < -0.02:
+            flag = "  <-- REGRESSION (AGENT_RULES.md Rule 8: V/N are zero-tolerance)"
+            if c == "V":
+                v_regressed = True
+            else:
+                n_regressed = True
+        print(f"  {c}: {baseline_ds2[c]:.4f} -> {metrics[c]['f1']:.4f}  ({delta:+.4f}){flag}")
+    print(f"  Macro-F1: {baseline_macro_f1:.4f} -> {macro_f1:.4f}  ({macro_f1 - baseline_macro_f1:+.4f})")
+    print(f"  V precision: {baseline_v_precision:.3f} -> {metrics['V']['precision']:.3f}  "
+          f"({metrics['V']['precision'] - baseline_v_precision:+.3f})  <- this is the number v1 broke")
+    print(f"  S->N rate: {baseline_s_to_n:.3f} -> {s_to_n_rate:.3f}  ({s_to_n_rate - baseline_s_to_n:+.3f})")
+    print(f"  S->V rate: {baseline_s_to_v:.3f} -> {s_to_v_rate:.3f}  ({s_to_v_rate - baseline_s_to_v:+.3f})")
+    print(f"  V->S rate: {baseline_v_to_s:.3f} -> {v_to_s_rate:.3f}  ({v_to_s_rate - baseline_v_to_s:+.3f})")
+
+    # ---- Comparison vs the BEST PRIOR two-stage result, not just the flat baseline ----
+    # v2's auto-verdict compared only to baseline_ds2 and printed "promotable CANDIDATE"
+    # for a run that beat the flat baseline by +0.0066 S F1 while losing v1's entire
+    # +0.204 S F1 gain -- a wash mislabeled as progress. See ABLATION_REPORT.md's
+    # two-stage v2 section for the correction this check exists to prevent.
+    print(f"\n=== vs best prior two-stage result ({_BEST_PRIOR_TWOSTAGE['label']}) ===")
+    s_vs_best_prior = metrics["S"]["f1"] - _BEST_PRIOR_TWOSTAGE["s_f1"]
+    print(f"  S F1: {_BEST_PRIOR_TWOSTAGE['s_f1']:.4f} -> {metrics['S']['f1']:.4f}  ({s_vs_best_prior:+.4f})")
+    is_wash_vs_prior = s_vs_best_prior < -0.02
+
+    if v_regressed or n_regressed:
+        print("\n*** Per AGENT_RULES.md Rule 8: V and/or N regressed beyond the trivial margin. "
+              "This candidate is NOT promotable as-is, even if S improved. Report honestly, do not "
+              "promote. ***")
+    elif metrics["S"]["f1"] <= baseline_ds2["S"]:
+        print("\n*** S did not improve over the flat baseline. Two-stage is a clean negative result "
+              "here -- report honestly per README.md's Honest-result rule, do not promote. ***")
+    elif is_wash_vs_prior:
+        print(f"\n*** S beats the flat baseline but is WORSE than the best prior two-stage result "
+              f"({_BEST_PRIOR_TWOSTAGE['label']}, S F1 {_BEST_PRIOR_TWOSTAGE['s_f1']:.4f}) by more than "
+              f"the trivial margin. This is a WASH relative to what two-stage has already been shown "
+              f"to achieve, not a genuine improvement -- do NOT label this 'promotable' just because "
+              f"it beats the flat baseline. Report honestly. ***")
+    else:
+        print("\nNo V/N regression, S improved over the flat baseline, AND S is not worse than the "
+              "best prior two-stage result -- a promotable CANDIDATE pending explicit human review "
+              "(AGENT_RULES.md Rule 8(c)). STOP here; do not promote automatically.")
+
+    return {"stage1_threshold": threshold, "metrics": metrics, "macro_f1": macro_f1,
+            "confusion_matrix": cm.tolist(), "s_recall_ds2_stage1": s_recall_ds2,
+            "abnormal_recall_ds2_stage1": abn_recall_ds2}
+
+
+# ============================================================================
+# analyze_twostage_stage1.py — CLI: EXPERIMENT C -- is Stage 1's precision/
+# S-recall trade-off fixable by threshold alone?
+# ============================================================================
+_ANALYZE_TWOSTAGE_STAGE1_DOC = """CLI: EXPERIMENT C -- is there ANY Stage-1 operating threshold where
+abnormal-PRECISION is high (few confident false-positive N leaks) AND
+S-recall stays acceptable? This is the decisive test of whether two-stage's
+proven bottleneck (Stage 1 emits confidently-wrong N beats -- see the
+"Two-stage: consolidated conclusion" section of ABLATION_REPORT.md) is
+fixable by threshold alone, or whether S-recall and N-precision are
+fundamentally in tension at the gate.
+
+Loads the EXISTING v1 Stage 1 / Stage 2 artifacts (no retraining -- "one
+change at a time" means only the operating threshold varies here; v1's
+recipe, features, and Stage 2 are unchanged by construction, not just by
+claim). Reports, per threshold, on DS1_VAL (tuning signal) and DS2
+(report-only -- these numbers are read, never used to pick anything, so
+this stays within AGENT_RULES.md rule 1):
+  - Stage-1-ISOLATED abnormal-precision, abnormal-recall, S/V/F-recall,
+    N-specificity (does Stage 1's OWN call agree with the truth, before
+    Stage 2 touches anything)
+  - Chained (Stage1->Stage2) S F1, V F1, V precision, macro-F1 (what the
+    full system actually delivers at that threshold, reusing v1's
+    unmodified Stage 2 so the effect is attributable to Stage 1 alone)
+Plus a fixed, threshold-independent diagnostic: how many true-N beats does
+this Stage 1 assign P(abnormal) > 0.85 -- beats it is CONFIDENT about, not
+just beats that happen to leak at today's threshold.
+
+Usage:
+    python -m ecg_pipeline.ecg_pipeline_tools analyze-twostage-stage1
+"""
+
+
+def main_analyze_twostage_stage1(argv=None):
+    parser = argparse.ArgumentParser(description=_ANALYZE_TWOSTAGE_STAGE1_DOC)
+    parser.add_argument("--data-root", type=Path, default=DATA_RAW / "public")
+    parser.add_argument("--stage1-model", type=Path, default=MODELS_DIR / "five_class_xgb_twostage_v1_stage1.json")
+    parser.add_argument("--stage2-model", type=Path, default=MODELS_DIR / "five_class_xgb_twostage_v1_stage2.json")
+    parser.add_argument("--confident-threshold", type=float, default=0.85,
+                         help="P(abnormal) above which a leaked N beat counts as 'confidently wrong', "
+                              "not just leaked")
+    args = parser.parse_args(argv)
+
+    db_dir = args.data_root / "mitdb"
+    print("Building DS1_VAL (patient-level tuning split, 63-dim) ...")
+    X_val, y_val = build_dataset(db_dir, DS1_VAL, include_timing=True)
+    print("Building DS2 (held-out, report-only, 63-dim) ...")
+    X_test, y_test = build_dataset(db_dir, MITDB_DS2, include_timing=True)
+
+    stage1 = FiveClassBeatClassifier()
+    stage1.load(args.stage1_model)
+    stage2 = FiveClassBeatClassifier()
+    stage2.load(args.stage2_model)
+    print(f"Loaded Stage 1 <- {args.stage1_model}")
+    print(f"Loaded Stage 2 <- {args.stage2_model}  (classes: {list(stage2._label_encoder.classes_)})")
+
+    for split_name, X_eval, y_eval in [("DS1_VAL (tuning signal)", X_val, y_val),
+                                        ("DS2 (report-only)", X_test, y_test)]:
+        print(f"\n=== EXPERIMENT C: Stage-1-isolated precision/S-recall trade-off "
+              f"+ chained effect on {split_name} ===")
+        y_eval_arr = np.array(y_eval)
+        abnormal_proba = _stage1_abnormal_proba(stage1, X_eval)
+        n_mask, s_mask, v_mask, f_mask = (y_eval_arr == "N", y_eval_arr == "S",
+                                           y_eval_arr == "V", y_eval_arr == "F")
+        abn_mask = y_eval_arr != "N"
+
+        print(f"{'thresh':<8}{'abn_prec':<10}{'abn_rec':<9}{'S_rec':<8}{'V_rec':<8}{'F_rec':<8}{'N_spec':<8}"
+              f"{'chS_f1':<8}{'chV_f1':<8}{'chV_prec':<9}{'ch_macroF1':<11}")
+        candidates = []
+        for threshold in np.arange(0.05, 1.0, 0.05):
+            threshold = float(threshold)
+            predicted_abnormal = abnormal_proba >= threshold
+            abn_precision = float((predicted_abnormal & abn_mask).sum() / predicted_abnormal.sum()) \
+                if predicted_abnormal.any() else 0.0
+            abn_recall = float((predicted_abnormal & abn_mask).sum() / abn_mask.sum()) if abn_mask.any() else 0.0
+            s_recall = float((predicted_abnormal & s_mask).sum() / s_mask.sum()) if s_mask.any() else 0.0
+            v_recall = float((predicted_abnormal & v_mask).sum() / v_mask.sum()) if v_mask.any() else 0.0
+            f_recall = float((predicted_abnormal & f_mask).sum() / f_mask.sum()) if f_mask.any() else 0.0
+            n_specificity = float((~predicted_abnormal & n_mask).sum() / n_mask.sum()) if n_mask.any() else 0.0
+
+            chained = chained_eval(stage1, stage2, X_eval, y_eval, threshold)
+            cm = chained["metrics"]
+            ch_s_f1, ch_v_f1, ch_v_prec = cm["S"]["f1"], cm["V"]["f1"], cm["V"]["precision"]
+
+            print(f"{threshold:<8.2f}{abn_precision:<10.3f}{abn_recall:<9.3f}{s_recall:<8.3f}{v_recall:<8.3f}"
+                  f"{f_recall:<8.3f}{n_specificity:<8.3f}{ch_s_f1:<8.3f}{ch_v_f1:<8.3f}{ch_v_prec:<9.3f}"
+                  f"{chained['macro_f1']:<11.4f}")
+
+            if abn_precision >= 0.90 and s_recall >= 0.70:
+                candidates.append(round(threshold, 2))
+
+        if candidates:
+            print(f"\nCandidate thresholds with isolated abnormal-precision >= 0.90 AND S-recall >= 0.70: "
+                  f"{candidates}")
+        else:
+            print("\nNo threshold achieves BOTH isolated abnormal-precision >= 0.90 AND S-recall >= 0.70 "
+                  f"on {split_name}.")
+
+    # ---- Fixed diagnostic: confident false-positive N beats on DS2 (threshold-independent) ----
+    abnormal_proba_test = _stage1_abnormal_proba(stage1, X_test)
+    y_test_arr = np.array(y_test)
+    n_mask_test = y_test_arr == "N"
+    confident_fp = int(((abnormal_proba_test > args.confident_threshold) & n_mask_test).sum())
+    print(f"\n=== Fixed diagnostic: confident false-positive N beats on DS2 "
+          f"(P(abnormal) > {args.confident_threshold}) ===")
+    print(f"{confident_fp} of {int(n_mask_test.sum())} true N beats have P(abnormal) > "
+          f"{args.confident_threshold} -- threshold-INDEPENDENT: no gate threshold at or below "
+          f"{args.confident_threshold} on THIS Stage 1 model can exclude them without also excluding "
+          "every true abnormal beat Stage 1 is similarly confident about.")
+
+
+# ============================================================================
 # Combined CLI dispatcher
 # ============================================================================
 
@@ -1230,6 +1863,8 @@ _SUBCOMMANDS = {
     "train-encoder": main_train_encoder,
     "train-classifiers": main_train_classifiers,
     "eval-classifier": main_eval_classifier,
+    "train-twostage": main_train_twostage,
+    "analyze-twostage-stage1": main_analyze_twostage_stage1,
 }
 
 

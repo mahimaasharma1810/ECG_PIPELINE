@@ -581,13 +581,26 @@ def _snr_db(x: np.ndarray, fs: float) -> float:
 
 def evaluate_window(x: np.ndarray, t_ms: np.ndarray, fs: float,
                      clip_value: float | None, thresholds: SQIThresholds = SQI) -> WindowVerdict:
+    # baseline_wander_ratio and snr_db both split the window into a
+    # 0.5-40Hz "signal" band and call everything outside that "wander"/
+    # "noise". On raw, unfiltered input (e.g. WFDB) that scores the
+    # window's own real per-window baseline offset as noise, because this
+    # gate runs BEFORE Stage 4's baseline removal by design (so it can
+    # catch genuinely bad signal before any filter gets a chance to hide
+    # it). Score those two metrics on a locally baseline-corrected copy
+    # instead -- the same 0.5Hz highpass Stage 4 already trusts --
+    # while flatline/clipping/missing/kurtosis stay on the raw window,
+    # which needs real railing/dropout/shape, not a detrended view.
+    x_valid = x[~np.isnan(x)]
+    x_scoring = highpass_residual(x_valid, fs, cutoff_hz=0.5) if len(x_valid) >= 9 else x_valid
+
     metrics = {
         "flatline_frac": _flatline_frac(x, fs, thresholds.flatline_run_ms),
         "clipping_frac": _clipping_frac(x, fs, thresholds.clipping_run_ms, clip_value),
         "missing_frac": _missing_frac(x),
         "morphology_kurtosis": _morphology_kurtosis(x),
-        "baseline_wander_ratio": _baseline_wander_ratio(x, fs),
-        "snr_db": _snr_db(x, fs),
+        "baseline_wander_ratio": _baseline_wander_ratio(x_scoring, fs),
+        "snr_db": _snr_db(x_scoring, fs),
     }
 
     reject_code = None

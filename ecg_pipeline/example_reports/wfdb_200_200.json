@@ -1,0 +1,646 @@
+{
+  "generated_at": "2026-07-24T07:05:39.450153+00:00",
+  "recording": {
+    "source": "wfdb",
+    "patient_id": "200",
+    "segment_id": "200",
+    "duration_s": 1805.55,
+    "n_raw_samples": 650000,
+    "fs_nominal_hz": 360.0,
+    "fs_processed_hz": 125.0,
+    "quality_score": 0.4227,
+    "sqi_window_rejection_rate": 0.5773,
+    "n_beats_detected": 1123,
+    "n_beats_analyzed": 354,
+    "n_beats_flagged_low_quality": 769
+  },
+  "beat_summary": {
+    "N": {
+      "count": 318,
+      "pct_of_analyzed_beats": 28.32,
+      "confidence": "HIGH",
+      "note": "Majority class; reliable in practice though not broken out separately in the DS2 macro-F1 table."
+    },
+    "S": {
+      "count": 17,
+      "pct_of_analyzed_beats": 1.51,
+      "confidence": "LOW",
+      "note": "DS2 held-out F1 = 0.139 (production five_class_xgb.json). Frequent S<->N confusion -- treat S counts as a screening signal, not a diagnosis."
+    },
+    "V": {
+      "count": 19,
+      "pct_of_analyzed_beats": 1.69,
+      "confidence": "MODERATE-HIGH",
+      "note": "DS2 held-out F1 = 0.826 (production five_class_xgb.json). The most reliable class this model produces."
+    },
+    "F": {
+      "count": 0,
+      "pct_of_analyzed_beats": 0.0,
+      "confidence": "LOW",
+      "note": "DS2 held-out F1 = 0.011 (production five_class_xgb.json). Essentially unsolved -- any F count should be treated as noise, not a finding."
+    },
+    "Q": {
+      "count": 769,
+      "pct_of_analyzed_beats": 68.48,
+      "confidence": "N/A",
+      "note": "Assigned to beats rejected by the deterministic quality gate, not predicted by the classifier."
+    }
+  },
+  "rhythm_findings": [
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 0,
+      "end_beat_idx": 19,
+      "start_time_s": 0.192,
+      "duration_s": 27.04,
+      "evidence": {
+        "rr_cv": 0.33928789997547426
+      },
+      "evidence_text": "RR coefficient-of-variation 0.339 > 0.15 over a 20-beat rolling window (beats 0-19)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 20,
+      "end_beat_idx": 39,
+      "start_time_s": 27.896,
+      "duration_s": 34.0,
+      "evidence": {
+        "rr_cv": 0.2733956696703971
+      },
+      "evidence_text": "RR coefficient-of-variation 0.273 > 0.15 over a 20-beat rolling window (beats 20-39)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 40,
+      "end_beat_idx": 59,
+      "start_time_s": 62.576,
+      "duration_s": 58.976,
+      "evidence": {
+        "rr_cv": 0.30387402120555596
+      },
+      "evidence_text": "RR coefficient-of-variation 0.304 > 0.15 over a 20-beat rolling window (beats 40-59)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 60,
+      "end_beat_idx": 79,
+      "start_time_s": 122.024,
+      "duration_s": 57.6,
+      "evidence": {
+        "rr_cv": 0.24886673722468083
+      },
+      "evidence_text": "RR coefficient-of-variation 0.249 > 0.15 over a 20-beat rolling window (beats 60-79)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 80,
+      "end_beat_idx": 99,
+      "start_time_s": 180.112,
+      "duration_s": 13.672,
+      "evidence": {
+        "rr_cv": 0.22365425412132586
+      },
+      "evidence_text": "RR coefficient-of-variation 0.224 > 0.15 over a 20-beat rolling window (beats 80-99)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 100,
+      "end_beat_idx": 119,
+      "start_time_s": 194.472,
+      "duration_s": 47.216,
+      "evidence": {
+        "rr_cv": 0.17130336326519663
+      },
+      "evidence_text": "RR coefficient-of-variation 0.171 > 0.15 over a 20-beat rolling window (beats 100-119)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 120,
+      "end_beat_idx": 139,
+      "start_time_s": 242.28,
+      "duration_s": 37.664,
+      "evidence": {
+        "rr_cv": 0.1765677881978068
+      },
+      "evidence_text": "RR coefficient-of-variation 0.177 > 0.15 over a 20-beat rolling window (beats 120-139)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 160,
+      "end_beat_idx": 179,
+      "start_time_s": 302.552,
+      "duration_s": 26.504,
+      "evidence": {
+        "rr_cv": 0.19728464986975536
+      },
+      "evidence_text": "RR coefficient-of-variation 0.197 > 0.15 over a 20-beat rolling window (beats 160-179)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 180,
+      "end_beat_idx": 199,
+      "start_time_s": 329.544,
+      "duration_s": 17.256,
+      "evidence": {
+        "rr_cv": 0.2365049714556352
+      },
+      "evidence_text": "RR coefficient-of-variation 0.237 > 0.15 over a 20-beat rolling window (beats 180-199)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 220,
+      "end_beat_idx": 239,
+      "start_time_s": 369.696,
+      "duration_s": 48.6,
+      "evidence": {
+        "rr_cv": 0.25251976586993724
+      },
+      "evidence_text": "RR coefficient-of-variation 0.253 > 0.15 over a 20-beat rolling window (beats 220-239)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 240,
+      "end_beat_idx": 259,
+      "start_time_s": 419.024,
+      "duration_s": 67.696,
+      "evidence": {
+        "rr_cv": 0.34119416899823257
+      },
+      "evidence_text": "RR coefficient-of-variation 0.341 > 0.15 over a 20-beat rolling window (beats 240-259)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 260,
+      "end_beat_idx": 279,
+      "start_time_s": 487.44,
+      "duration_s": 12.888,
+      "evidence": {
+        "rr_cv": 0.32209224347111565
+      },
+      "evidence_text": "RR coefficient-of-variation 0.322 > 0.15 over a 20-beat rolling window (beats 260-279)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 280,
+      "end_beat_idx": 299,
+      "start_time_s": 501.264,
+      "duration_s": 41.808,
+      "evidence": {
+        "rr_cv": 0.19178423292592608
+      },
+      "evidence_text": "RR coefficient-of-variation 0.192 > 0.15 over a 20-beat rolling window (beats 280-299)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 300,
+      "end_beat_idx": 319,
+      "start_time_s": 543.696,
+      "duration_s": 28.72,
+      "evidence": {
+        "rr_cv": 0.21161714407486
+      },
+      "evidence_text": "RR coefficient-of-variation 0.212 > 0.15 over a 20-beat rolling window (beats 300-319)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 320,
+      "end_beat_idx": 339,
+      "start_time_s": 573.336,
+      "duration_s": 51.744,
+      "evidence": {
+        "rr_cv": 0.18013902941905777
+      },
+      "evidence_text": "RR coefficient-of-variation 0.180 > 0.15 over a 20-beat rolling window (beats 320-339)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 340,
+      "end_beat_idx": 359,
+      "start_time_s": 625.472,
+      "duration_s": 28.216,
+      "evidence": {
+        "rr_cv": 0.19235618559082773
+      },
+      "evidence_text": "RR coefficient-of-variation 0.192 > 0.15 over a 20-beat rolling window (beats 340-359)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 360,
+      "end_beat_idx": 379,
+      "start_time_s": 654.2,
+      "duration_s": 26.52,
+      "evidence": {
+        "rr_cv": 0.2233440719725441
+      },
+      "evidence_text": "RR coefficient-of-variation 0.223 > 0.15 over a 20-beat rolling window (beats 360-379)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 380,
+      "end_beat_idx": 399,
+      "start_time_s": 681.296,
+      "duration_s": 17.184,
+      "evidence": {
+        "rr_cv": 0.1763494906686184
+      },
+      "evidence_text": "RR coefficient-of-variation 0.176 > 0.15 over a 20-beat rolling window (beats 380-399)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 420,
+      "end_beat_idx": 439,
+      "start_time_s": 726.848,
+      "duration_s": 17.816,
+      "evidence": {
+        "rr_cv": 0.21381110426563465
+      },
+      "evidence_text": "RR coefficient-of-variation 0.214 > 0.15 over a 20-beat rolling window (beats 420-439)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 440,
+      "end_beat_idx": 459,
+      "start_time_s": 770.4,
+      "duration_s": 17.776,
+      "evidence": {
+        "rr_cv": 0.17572396373171795
+      },
+      "evidence_text": "RR coefficient-of-variation 0.176 > 0.15 over a 20-beat rolling window (beats 440-459)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 460,
+      "end_beat_idx": 479,
+      "start_time_s": 789.12,
+      "duration_s": 32.496,
+      "evidence": {
+        "rr_cv": 0.19754033001591761
+      },
+      "evidence_text": "RR coefficient-of-variation 0.198 > 0.15 over a 20-beat rolling window (beats 460-479)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 480,
+      "end_beat_idx": 499,
+      "start_time_s": 822.176,
+      "duration_s": 36.448,
+      "evidence": {
+        "rr_cv": 0.18404016166136158
+      },
+      "evidence_text": "RR coefficient-of-variation 0.184 > 0.15 over a 20-beat rolling window (beats 480-499)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 500,
+      "end_beat_idx": 519,
+      "start_time_s": 859.216,
+      "duration_s": 41.448,
+      "evidence": {
+        "rr_cv": 0.32149914337199376
+      },
+      "evidence_text": "RR coefficient-of-variation 0.321 > 0.15 over a 20-beat rolling window (beats 500-519)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 520,
+      "end_beat_idx": 539,
+      "start_time_s": 901.304,
+      "duration_s": 37.376,
+      "evidence": {
+        "rr_cv": 0.3656971258678123
+      },
+      "evidence_text": "RR coefficient-of-variation 0.366 > 0.15 over a 20-beat rolling window (beats 520-539)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 540,
+      "end_beat_idx": 559,
+      "start_time_s": 939.376,
+      "duration_s": 12.64,
+      "evidence": {
+        "rr_cv": 0.31163712008670547
+      },
+      "evidence_text": "RR coefficient-of-variation 0.312 > 0.15 over a 20-beat rolling window (beats 540-559)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 560,
+      "end_beat_idx": 579,
+      "start_time_s": 952.584,
+      "duration_s": 26.56,
+      "evidence": {
+        "rr_cv": 0.29690217920175893
+      },
+      "evidence_text": "RR coefficient-of-variation 0.297 > 0.15 over a 20-beat rolling window (beats 560-579)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 580,
+      "end_beat_idx": 599,
+      "start_time_s": 979.912,
+      "duration_s": 47.256,
+      "evidence": {
+        "rr_cv": 0.3328606152738888
+      },
+      "evidence_text": "RR coefficient-of-variation 0.333 > 0.15 over a 20-beat rolling window (beats 580-599)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 600,
+      "end_beat_idx": 619,
+      "start_time_s": 1027.968,
+      "duration_s": 28.896,
+      "evidence": {
+        "rr_cv": 0.29112687757368444
+      },
+      "evidence_text": "RR coefficient-of-variation 0.291 > 0.15 over a 20-beat rolling window (beats 600-619)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 620,
+      "end_beat_idx": 639,
+      "start_time_s": 1057.792,
+      "duration_s": 18.168,
+      "evidence": {
+        "rr_cv": 0.2882117407345142
+      },
+      "evidence_text": "RR coefficient-of-variation 0.288 > 0.15 over a 20-beat rolling window (beats 620-639)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 640,
+      "end_beat_idx": 659,
+      "start_time_s": 1076.528,
+      "duration_s": 19.32,
+      "evidence": {
+        "rr_cv": 0.27373577878815986
+      },
+      "evidence_text": "RR coefficient-of-variation 0.274 > 0.15 over a 20-beat rolling window (beats 640-659)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 660,
+      "end_beat_idx": 679,
+      "start_time_s": 1096.584,
+      "duration_s": 33.184,
+      "evidence": {
+        "rr_cv": 0.259807186297832
+      },
+      "evidence_text": "RR coefficient-of-variation 0.260 > 0.15 over a 20-beat rolling window (beats 660-679)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 680,
+      "end_beat_idx": 699,
+      "start_time_s": 1135.296,
+      "duration_s": 17.624,
+      "evidence": {
+        "rr_cv": 0.26750536270972897
+      },
+      "evidence_text": "RR coefficient-of-variation 0.268 > 0.15 over a 20-beat rolling window (beats 680-699)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 700,
+      "end_beat_idx": 719,
+      "start_time_s": 1153.656,
+      "duration_s": 28.28,
+      "evidence": {
+        "rr_cv": 0.26647891753370573
+      },
+      "evidence_text": "RR coefficient-of-variation 0.266 > 0.15 over a 20-beat rolling window (beats 700-719)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 720,
+      "end_beat_idx": 739,
+      "start_time_s": 1182.824,
+      "duration_s": 18.04,
+      "evidence": {
+        "rr_cv": 0.2750539269607949
+      },
+      "evidence_text": "RR coefficient-of-variation 0.275 > 0.15 over a 20-beat rolling window (beats 720-739)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 740,
+      "end_beat_idx": 759,
+      "start_time_s": 1201.696,
+      "duration_s": 22.352,
+      "evidence": {
+        "rr_cv": 0.3239496732171689
+      },
+      "evidence_text": "RR coefficient-of-variation 0.324 > 0.15 over a 20-beat rolling window (beats 740-759)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 760,
+      "end_beat_idx": 779,
+      "start_time_s": 1224.56,
+      "duration_s": 18.792,
+      "evidence": {
+        "rr_cv": 0.24735288695636096
+      },
+      "evidence_text": "RR coefficient-of-variation 0.247 > 0.15 over a 20-beat rolling window (beats 760-779)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 780,
+      "end_beat_idx": 799,
+      "start_time_s": 1243.768,
+      "duration_s": 13.136,
+      "evidence": {
+        "rr_cv": 0.2813783812842451
+      },
+      "evidence_text": "RR coefficient-of-variation 0.281 > 0.15 over a 20-beat rolling window (beats 780-799)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 800,
+      "end_beat_idx": 819,
+      "start_time_s": 1257.504,
+      "duration_s": 38.112,
+      "evidence": {
+        "rr_cv": 0.2910875002087958
+      },
+      "evidence_text": "RR coefficient-of-variation 0.291 > 0.15 over a 20-beat rolling window (beats 800-819)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 820,
+      "end_beat_idx": 839,
+      "start_time_s": 1296.392,
+      "duration_s": 12.816,
+      "evidence": {
+        "rr_cv": 0.30222346679626577
+      },
+      "evidence_text": "RR coefficient-of-variation 0.302 > 0.15 over a 20-beat rolling window (beats 820-839)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 840,
+      "end_beat_idx": 859,
+      "start_time_s": 1330.024,
+      "duration_s": 18.608,
+      "evidence": {
+        "rr_cv": 0.29360032188360796
+      },
+      "evidence_text": "RR coefficient-of-variation 0.294 > 0.15 over a 20-beat rolling window (beats 840-859)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 860,
+      "end_beat_idx": 879,
+      "start_time_s": 1349.488,
+      "duration_s": 17.768,
+      "evidence": {
+        "rr_cv": 0.2580121894239641
+      },
+      "evidence_text": "RR coefficient-of-variation 0.258 > 0.15 over a 20-beat rolling window (beats 860-879)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 880,
+      "end_beat_idx": 899,
+      "start_time_s": 1368.144,
+      "duration_s": 12.784,
+      "evidence": {
+        "rr_cv": 0.28353914130776303
+      },
+      "evidence_text": "RR coefficient-of-variation 0.284 > 0.15 over a 20-beat rolling window (beats 880-899)"
+    },
+    {
+      "kind": "AFIB_SUSPECTED",
+      "start_beat_idx": 900,
+      "end_beat_idx": 919,
+      "start_time_s": 1381.392,
+      "duration_s": 23.248,
+      "evidence": {
+        "rr_cv": 0.22869510454904637
+      },
+      "evidence_text": "RR coefficient-of-variation 0.229 > 0.15 over a 20-beat rolling window (beats 900-919)"
+    }
+  ],
+  "risk_level": "HIGH",
+  "rule_trace": [
+    {
+      "condition": "PVC burden > CRITICAL threshold",
+      "measured_value": 1.692,
+      "threshold": 20.0,
+      "fired": false,
+      "would_set_level": "CRITICAL",
+      "depends_on_low_confidence_class": false,
+      "is_deciding_rule": false
+    },
+    {
+      "condition": "VT run count > 0 (a run = >=3 consecutive V beats)",
+      "measured_value": 0,
+      "threshold": 0,
+      "fired": false,
+      "would_set_level": "CRITICAL",
+      "depends_on_low_confidence_class": false,
+      "is_deciding_rule": false
+    },
+    {
+      "condition": "PVC burden > HIGH threshold",
+      "measured_value": 1.692,
+      "threshold": 10.0,
+      "fired": false,
+      "would_set_level": "HIGH",
+      "depends_on_low_confidence_class": false,
+      "is_deciding_rule": false
+    },
+    {
+      "condition": "PAC burden > HIGH threshold OR AFib burden > HIGH threshold",
+      "measured_value": {
+        "pac_burden_pct": 1.514,
+        "afib_burden_pct": 93.478
+      },
+      "threshold": {
+        "pac_burden_pct": 15.0,
+        "afib_burden_pct": 30.0
+      },
+      "fired": true,
+      "would_set_level": "HIGH",
+      "depends_on_low_confidence_class": false,
+      "is_deciding_rule": true
+    },
+    {
+      "condition": "Sustained HRV suppression: SDNN < threshold",
+      "measured_value": 184.003,
+      "threshold": 20.0,
+      "fired": false,
+      "would_set_level": "MEDIUM",
+      "depends_on_low_confidence_class": false,
+      "is_deciding_rule": false
+    },
+    {
+      "condition": "NEWS2 safety override (>= critical threshold)",
+      "measured_value": null,
+      "threshold": 7,
+      "fired": false,
+      "would_set_level": "CRITICAL",
+      "depends_on_low_confidence_class": false,
+      "evaluated": false,
+      "is_deciding_rule": false
+    },
+    {
+      "condition": "qSOFA safety override (>= high threshold)",
+      "measured_value": null,
+      "threshold": 2,
+      "fired": false,
+      "would_set_level": "HIGH",
+      "depends_on_low_confidence_class": false,
+      "evaluated": false,
+      "is_deciding_rule": false
+    }
+  ],
+  "deciding_rule": {
+    "condition": "PAC burden > HIGH threshold OR AFib burden > HIGH threshold",
+    "measured_value": {
+      "pac_burden_pct": 1.514,
+      "afib_burden_pct": 93.478
+    },
+    "threshold": {
+      "pac_burden_pct": 15.0,
+      "afib_burden_pct": 30.0
+    },
+    "fired": true,
+    "would_set_level": "HIGH",
+    "depends_on_low_confidence_class": false,
+    "is_deciding_rule": true
+  },
+  "confidence": {
+    "tier": "MODERATE",
+    "statement": "AFib-suspected findings are computed from RR-interval irregularity directly, not from the beat classifier's S/F labels, so this is not subject to the S/F low-confidence caveat -- but it is a heuristic (RR coefficient-of-variation), not a rhythm-strip diagnosis.",
+    "caveat": "This is a proxy/heuristic confidence assessment produced by this reporting layer, not a statistically calibrated probability (no conformal calibration set has been loaded for this run) and not a clinical guarantee."
+  },
+  "safety_overrides": [
+    {
+      "override": "NEWS2",
+      "applied": false,
+      "note": "No NEWS2 score was supplied to this run -- override not evaluated. This bridge is ECG-only; vitals/NEWS2/qSOFA pairing is a separate, open integration question (see project memory)."
+    },
+    {
+      "override": "qSOFA",
+      "applied": false,
+      "note": "No qSOFA score was supplied to this run -- override not evaluated. This bridge is ECG-only; vitals/NEWS2/qSOFA pairing is a separate, open integration question (see project memory)."
+    }
+  ],
+  "known_limitations": [
+    "Beat classifier is the frozen production XGBoost model (five_class_xgb.json). DS2 held-out per-class F1: V=0.826 (reliable), S=0.139 (LOW-CONFIDENCE), F=0.011 (LOW-CONFIDENCE, essentially unsolved). Any finding driven primarily by S or F counts is a screening flag, not a diagnosis.",
+    "NEWS2/qSOFA vitals pairing is not wired into this ECG-only bridge -- safety_overrides above are reported as not-evaluated rather than fabricated."
+  ],
+  "narrative": "Risk level: HIGH.\nDeciding rule: PAC burden > HIGH threshold OR AFib burden > HIGH threshold -- measured {'pac_burden_pct': 1.514, 'afib_burden_pct': 93.478} vs threshold {'pac_burden_pct': 15.0, 'afib_burden_pct': 30.0} (fired=True).\nConfidence (MODERATE): AFib-suspected findings are computed from RR-interval irregularity directly, not from the beat classifier's S/F labels, so this is not subject to the S/F low-confidence caveat -- but it is a heuristic (RR coefficient-of-variation), not a rhythm-strip diagnosis.\nLimitation: Beat classifier is the frozen production XGBoost model (five_class_xgb.json). DS2 held-out per-class F1: V=0.826 (reliable), S=0.139 (LOW-CONFIDENCE), F=0.011 (LOW-CONFIDENCE, essentially unsolved). Any finding driven primarily by S or F counts is a screening flag, not a diagnosis.\nLimitation: NEWS2/qSOFA vitals pairing is not wired into this ECG-only bridge -- safety_overrides above are reported as not-evaluated rather than fabricated.\nClinician review suggested -- this is decision support, not a diagnosis.",
+  "medgemma": {
+    "status": "UNAVAILABLE_FALLBACK",
+    "endpoint": "http://localhost:11434/api/generate",
+    "model": "medgemma"
+  },
+  "final_risk_level": "HIGH",
+  "_annotation_cross_check": {
+    "ground_truth_annotation_V_count": 826,
+    "pipeline_predicted_V_count": 19,
+    "pipeline_n_beats_analyzed": 1123
+  }
+}

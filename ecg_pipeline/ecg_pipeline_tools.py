@@ -85,6 +85,27 @@ annotation count (AAMI-mapped) before finalizing:
 
 This is a one-time, documented, non-random choice — re-run the same
 annotation-count check before changing it.
+
+2026-07-20 update — enlarged DS1_VAL (4 -> 10 records): the 4-record
+carve-out above turned out to be too small a *patient* sample for its
+governing use (Stage-1 threshold tuning for the two-stage classifier,
+see ABLATION_REPORT.md Experiment C) — DS1_VAL and DS2 disagreed
+substantially on how fast S-recall degrades with threshold, and a
+4-patient split can't distinguish "real effect" from "which 4 patients
+happened to be in it." Doubled to 10 records by adding 114/116/124/
+205/215/220 to the original 4, using the same protective logic as
+208/F above: records 209 (S=351, the single largest S carrier outside
+the original 4) and 106/119 (V=516/444, the two largest V carriers)
+were deliberately KEPT IN TRAINING rather than added to VAL, so
+training doesn't lose its dominant S/V signal the same way it would if
+208 were pulled for F. Verified by direct annotation count:
+
+  DS1_VAL  (10 records): N=20384 S=510  V=1285 F=36  Q=0     total=22215
+  DS1_TRAIN(12 records): N=23130 S=363  V=2338 F=367 Q=7     total=26205
+
+Same one-time, documented, non-random methodology as the original
+choice — re-run the same annotation-count check before changing it
+again.
 """
 
 MITDB_DS1 = [101, 106, 108, 109, 112, 114, 115, 116, 118, 119, 122, 124,
@@ -132,7 +153,7 @@ SDDB_RECORDS = ["30", "31", "32", "33", "34", "35", "36", "37", "38", "39",
                  "40", "41", "42", "43", "44", "45", "46", "47", "48", "49",
                  "50", "51", "52"]
 
-_DS1_VAL_RECORDS = [118, 201, 207, 223]
+_DS1_VAL_RECORDS = [114, 116, 118, 124, 201, 205, 207, 215, 220, 223]
 
 DS1_VAL = sorted(_DS1_VAL_RECORDS)
 DS1_TRAIN = sorted(set(MITDB_DS1) - set(_DS1_VAL_RECORDS))
@@ -541,7 +562,8 @@ def _load_record_beats(record_path: Path, ann_ext: str = "atr",
                         include_timing: bool = False,
                         drop_compensatory_pause: bool = False,
                         timing_only: bool = False,
-                        include_r_amp: bool = False) -> tuple[np.ndarray, list[str]]:
+                        include_r_amp: bool = False,
+                        include_qrs_shape: bool = False) -> tuple[np.ndarray, list[str]]:
     """Returns (feature_matrix, labels) for every valid, non-rejected beat
     in one WFDB record, using ground-truth annotation positions."""
     record = wfdb.rdrecord(str(record_path))
@@ -552,7 +574,7 @@ def _load_record_beats(record_path: Path, ann_ext: str = "atr",
     keep = [i for i, sym in enumerate(ann.symbol) if sym in AAMI_SYMBOL_MAP]
     if not keep:
         return np.zeros((0, _feature_width(include_timing, drop_compensatory_pause,
-                                            timing_only, include_r_amp))), []
+                                            timing_only, include_r_amp, include_qrs_shape))), []
     ann_samples = ann.sample[keep]
     ann_labels = [AAMI_SYMBOL_MAP[ann.symbol[i]] for i in keep]
 
@@ -579,21 +601,23 @@ def _load_record_beats(record_path: Path, ann_ext: str = "atr",
     for beat, label in zip(beats, ann_labels):
         vec = beat_feature_vector(beat, primary_pre_samples, include_timing=include_timing,
                                    drop_compensatory_pause=drop_compensatory_pause,
-                                   timing_only=timing_only, include_r_amp=include_r_amp)
+                                   timing_only=timing_only, include_r_amp=include_r_amp,
+                                   include_qrs_shape=include_qrs_shape)
         if vec is not None:
             rows.append(vec)
             labels.append(label)
 
     return (np.vstack(rows) if rows else
             np.zeros((0, _feature_width(include_timing, drop_compensatory_pause,
-                                         timing_only, include_r_amp)))), labels
+                                         timing_only, include_r_amp, include_qrs_shape)))), labels
 
 
 def build_dataset(db_dir: Path, record_ids: list[int],
                    include_timing: bool = False,
                    drop_compensatory_pause: bool = False,
                    timing_only: bool = False,
-                   include_r_amp: bool = False) -> tuple[np.ndarray, list[str]]:
+                   include_r_amp: bool = False,
+                   include_qrs_shape: bool = False) -> tuple[np.ndarray, list[str]]:
     all_X, all_y = [], []
     for rid in record_ids:
         record_path = db_dir / str(rid)
@@ -608,12 +632,14 @@ def build_dataset(db_dir: Path, record_ids: list[int],
             continue
         X, y = _load_record_beats(record_path, include_timing=include_timing,
                                    drop_compensatory_pause=drop_compensatory_pause,
-                                   timing_only=timing_only, include_r_amp=include_r_amp)
+                                   timing_only=timing_only, include_r_amp=include_r_amp,
+                                   include_qrs_shape=include_qrs_shape)
         print(f"  {rid}: {len(y)} labeled beats")
         all_X.append(X)
         all_y.extend(y)
     X = np.vstack(all_X) if all_X else np.zeros(
-        (0, _feature_width(include_timing, drop_compensatory_pause, timing_only, include_r_amp)))
+        (0, _feature_width(include_timing, drop_compensatory_pause, timing_only, include_r_amp,
+                            include_qrs_shape)))
     return X, all_y
 
 

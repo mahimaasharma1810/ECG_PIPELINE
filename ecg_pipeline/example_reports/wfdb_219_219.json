@@ -1,0 +1,175 @@
+{
+  "generated_at": "2026-07-24T07:06:58.750918+00:00",
+  "recording": {
+    "source": "wfdb",
+    "patient_id": "219",
+    "segment_id": "219",
+    "duration_s": 1805.55,
+    "n_raw_samples": 650000,
+    "fs_nominal_hz": 360.0,
+    "fs_processed_hz": 125.0,
+    "quality_score": 0.0,
+    "sqi_window_rejection_rate": 1.0,
+    "n_beats_detected": 0,
+    "n_beats_analyzed": 0,
+    "n_beats_flagged_low_quality": 0
+  },
+  "beat_summary": {
+    "N": {
+      "count": 0,
+      "pct_of_analyzed_beats": 0.0,
+      "confidence": "HIGH",
+      "note": "Majority class; reliable in practice though not broken out separately in the DS2 macro-F1 table."
+    },
+    "S": {
+      "count": 0,
+      "pct_of_analyzed_beats": 0.0,
+      "confidence": "LOW",
+      "note": "DS2 held-out F1 = 0.139 (production five_class_xgb.json). Frequent S<->N confusion -- treat S counts as a screening signal, not a diagnosis."
+    },
+    "V": {
+      "count": 0,
+      "pct_of_analyzed_beats": 0.0,
+      "confidence": "MODERATE-HIGH",
+      "note": "DS2 held-out F1 = 0.826 (production five_class_xgb.json). The most reliable class this model produces."
+    },
+    "F": {
+      "count": 0,
+      "pct_of_analyzed_beats": 0.0,
+      "confidence": "LOW",
+      "note": "DS2 held-out F1 = 0.011 (production five_class_xgb.json). Essentially unsolved -- any F count should be treated as noise, not a finding."
+    },
+    "Q": {
+      "count": 0,
+      "pct_of_analyzed_beats": 0.0,
+      "confidence": "N/A",
+      "note": "Assigned to beats rejected by the deterministic quality gate, not predicted by the classifier."
+    }
+  },
+  "rhythm_findings": [],
+  "risk_level": "LOW",
+  "rule_trace": [
+    {
+      "condition": "PVC burden > CRITICAL threshold",
+      "measured_value": 0.0,
+      "threshold": 20.0,
+      "fired": false,
+      "would_set_level": "CRITICAL",
+      "depends_on_low_confidence_class": false,
+      "is_deciding_rule": false
+    },
+    {
+      "condition": "VT run count > 0 (a run = >=3 consecutive V beats)",
+      "measured_value": 0,
+      "threshold": 0,
+      "fired": false,
+      "would_set_level": "CRITICAL",
+      "depends_on_low_confidence_class": false,
+      "is_deciding_rule": false
+    },
+    {
+      "condition": "PVC burden > HIGH threshold",
+      "measured_value": 0.0,
+      "threshold": 10.0,
+      "fired": false,
+      "would_set_level": "HIGH",
+      "depends_on_low_confidence_class": false,
+      "is_deciding_rule": false
+    },
+    {
+      "condition": "PAC burden > HIGH threshold OR AFib burden > HIGH threshold",
+      "measured_value": {
+        "pac_burden_pct": 0.0,
+        "afib_burden_pct": 0.0
+      },
+      "threshold": {
+        "pac_burden_pct": 15.0,
+        "afib_burden_pct": 30.0
+      },
+      "fired": false,
+      "would_set_level": "HIGH",
+      "depends_on_low_confidence_class": false,
+      "is_deciding_rule": false
+    },
+    {
+      "condition": "Sustained HRV suppression: SDNN < threshold",
+      "measured_value": 0.0,
+      "threshold": 20.0,
+      "fired": false,
+      "would_set_level": "MEDIUM",
+      "depends_on_low_confidence_class": false,
+      "is_deciding_rule": false
+    },
+    {
+      "condition": "NEWS2 safety override (>= critical threshold)",
+      "measured_value": null,
+      "threshold": 7,
+      "fired": false,
+      "would_set_level": "CRITICAL",
+      "depends_on_low_confidence_class": false,
+      "evaluated": false,
+      "is_deciding_rule": false
+    },
+    {
+      "condition": "qSOFA safety override (>= high threshold)",
+      "measured_value": null,
+      "threshold": 2,
+      "fired": false,
+      "would_set_level": "HIGH",
+      "depends_on_low_confidence_class": false,
+      "evaluated": false,
+      "is_deciding_rule": false
+    },
+    {
+      "condition": "No thresholds exceeded",
+      "measured_value": null,
+      "threshold": null,
+      "fired": true,
+      "would_set_level": "LOW",
+      "depends_on_low_confidence_class": false,
+      "is_deciding_rule": true
+    }
+  ],
+  "deciding_rule": {
+    "condition": "No thresholds exceeded",
+    "measured_value": null,
+    "threshold": null,
+    "fired": true,
+    "would_set_level": "LOW",
+    "depends_on_low_confidence_class": false,
+    "is_deciding_rule": true
+  },
+  "confidence": {
+    "tier": "BASELINE",
+    "statement": "No threshold was exceeded (LOW). Because the S and F classes are the model's weakest (held-out F1 0.139 and 0.011), a LOW read here does not rule out under-counted S/F events -- it reliably rules out V-burden, VT runs, and HRV suppression, which this model detects well.",
+    "caveat": "This is a proxy/heuristic confidence assessment produced by this reporting layer, not a statistically calibrated probability (no conformal calibration set has been loaded for this run) and not a clinical guarantee."
+  },
+  "safety_overrides": [
+    {
+      "override": "NEWS2",
+      "applied": false,
+      "note": "No NEWS2 score was supplied to this run -- override not evaluated. This bridge is ECG-only; vitals/NEWS2/qSOFA pairing is a separate, open integration question (see project memory)."
+    },
+    {
+      "override": "qSOFA",
+      "applied": false,
+      "note": "No qSOFA score was supplied to this run -- override not evaluated. This bridge is ECG-only; vitals/NEWS2/qSOFA pairing is a separate, open integration question (see project memory)."
+    }
+  ],
+  "known_limitations": [
+    "Beat classifier is the frozen production XGBoost model (five_class_xgb.json). DS2 held-out per-class F1: V=0.826 (reliable), S=0.139 (LOW-CONFIDENCE), F=0.011 (LOW-CONFIDENCE, essentially unsolved). Any finding driven primarily by S or F counts is a screening flag, not a diagnosis.",
+    "NEWS2/qSOFA vitals pairing is not wired into this ECG-only bridge -- safety_overrides above are reported as not-evaluated rather than fabricated."
+  ],
+  "narrative": "Risk level: LOW.\nDeciding rule: No thresholds exceeded -- measured None vs threshold None (fired=True).\nConfidence (BASELINE): No threshold was exceeded (LOW). Because the S and F classes are the model's weakest (held-out F1 0.139 and 0.011), a LOW read here does not rule out under-counted S/F events -- it reliably rules out V-burden, VT runs, and HRV suppression, which this model detects well.\nLimitation: Beat classifier is the frozen production XGBoost model (five_class_xgb.json). DS2 held-out per-class F1: V=0.826 (reliable), S=0.139 (LOW-CONFIDENCE), F=0.011 (LOW-CONFIDENCE, essentially unsolved). Any finding driven primarily by S or F counts is a screening flag, not a diagnosis.\nLimitation: NEWS2/qSOFA vitals pairing is not wired into this ECG-only bridge -- safety_overrides above are reported as not-evaluated rather than fabricated.\nClinician review suggested -- this is decision support, not a diagnosis.",
+  "medgemma": {
+    "status": "UNAVAILABLE_FALLBACK",
+    "endpoint": "http://localhost:11434/api/generate",
+    "model": "medgemma"
+  },
+  "final_risk_level": "LOW",
+  "_annotation_cross_check": {
+    "ground_truth_annotation_V_count": 64,
+    "pipeline_predicted_V_count": 0,
+    "pipeline_n_beats_analyzed": 0
+  }
+}

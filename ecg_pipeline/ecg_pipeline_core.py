@@ -1050,17 +1050,19 @@ warnings.filterwarnings("ignore", message="Level value of.*is too high", module=
 N_MORPHOLOGICAL = 5
 N_WAVELET = 51
 N_TIMING = 7
+N_QRS_SHAPE = 4
 N_FEATURES = N_MORPHOLOGICAL + N_WAVELET  # unchanged: production's dimensionality
 N_FEATURES_WITH_TIMING = N_FEATURES + N_TIMING
 
 
 def _feature_width(include_timing: bool, drop_compensatory_pause: bool = False,
-                    timing_only: bool = False, include_r_amp: bool = False) -> int:
+                    timing_only: bool = False, include_r_amp: bool = False,
+                    include_qrs_shape: bool = False) -> int:
     timing_width = (N_TIMING - (1 if drop_compensatory_pause else 0)) if (include_timing or timing_only) else 0
     if timing_only:
         return timing_width
     base_width = N_FEATURES + (1 if include_r_amp else 0)
-    return base_width + timing_width
+    return base_width + timing_width + (N_QRS_SHAPE if include_qrs_shape else 0)
 
 
 TIMING_FEATURE_NAMES = ["rr_ratio_k8", "rr_ratio_k16", "rr_ratio_k32", "rr_pre_post_ratio",
@@ -1145,11 +1147,118 @@ def _r_amp_feature(window: np.ndarray, primary_pre_samples: int) -> np.ndarray:
     return np.array([float(window[primary_pre_samples])])
 
 
+def _qrs_width_amplitude_crossing(window: np.ndarray, r_idx: int, fs: float,
+                                   fraction: float = 0.15,
+                                   width_radius_samples: int = 15) -> float:
+    """FIX (2026-07-23): replaces the derivative-threshold QRS-width walk,
+    which collapsed to a 1-sample floor on ~9% of true-V beats -- a
+    fragmented/notched wide V complex can have a local derivative dip below
+    a 10%-of-peak-derivative threshold in the MIDDLE of the complex, so that
+    walk could terminate one sample from R even though the true complex is
+    still wide. Amplitude relative to baseline doesn't have this failure
+    mode: a wide complex stays far from baseline throughout its width even
+    if notched, so a level-crossing on amplitude is far more robust than a
+    threshold on the derivative.
+
+    Baseline = median of the whole (already robust_zscore-normalized)
+    window -- the beat spends most of its ~600ms span near isoelectric
+    baseline even within this short window, so the median is a simple,
+    adequate isoelectric estimate without needing a separate PQ-segment
+    detector. R height = |R amplitude - baseline|. Onset/offset are found
+    by walking outward from R until |signal - baseline| crosses below
+    `fraction` (default 15%) of R height, searched within
+    `width_radius_samples` (default 15 = 120ms @ 125Hz) of R on each side --
+    a fixed physiological window, per the guard-rail requirement. If no
+    crossing is found in that window (e.g. baseline is itself noisy, or R
+    height is ~0 for a degenerate beat), falls back to the WINDOW EDGE,
+    never to 1 sample -- the exact failure mode being fixed here."""
+    lo = max(0, r_idx - width_radius_samples)
+    hi = min(len(window) - 1, r_idx + width_radius_samples)
+    baseline = float(np.median(window))
+    r_height = abs(float(window[r_idx]) - baseline)
+
+    onset, offset = lo, hi  # guard-rail fallback: window edge, not 1 sample
+    if r_height > 1e-9:
+        level = fraction * r_height
+        for i in range(r_idx, lo - 1, -1):
+            if abs(window[i] - baseline) < level:
+                onset = i
+                break
+        for i in range(r_idx, hi + 1):
+            if abs(window[i] - baseline) < level:
+                offset = i
+                break
+    onset, offset = min(onset, r_idx), max(offset, r_idx)
+    return float((offset - onset) / fs * 1000.0)
+
+
+def _qrs_shape_features(window: np.ndarray, primary_pre_samples: int,
+                         fs: float = TARGET_FS, search_radius_samples: int = 20,
+                         width_fraction: float = 0.15,
+                         width_radius_ms: float = 120.0) -> np.ndarray:
+    """QRS-complex shape discriminators: qrs_width_ms, qrs_abs_area,
+    slope_pre_r, slope_post_r. Added to help Stage 2 separate narrow-QRS
+    beats (N, S -- supraventricular origin) from wide-QRS beats (V --
+    ventricular origin) -- the existing 56-dim vector has no direct measure
+    of QRS width itself (rr_pre/local_hrv in `_morphological_features` are
+    RR-timing, not QRS shape; area_ratio/above_below_ratio/amplitude_range
+    describe the whole ~600ms window, not specifically the QRS complex).
+    See ABLATION_REPORT.md "QRS morphology discriminators" for the DS2
+    confusion-matrix evidence (N->V and S->V leakage) this addresses.
+
+    `qrs_abs_area` and the two slopes are computed from a derivative-
+    threshold onset/offset walk outward from R (searched within
+    `search_radius_samples` of R on each side, stopping where the
+    derivative magnitude drops below 10% of the local peak derivative) --
+    UNCHANGED since the feature was first added. `qrs_width_ms` (2026-07-23
+    fix) uses a SEPARATE, more robust amplitude-crossing measure instead
+    (`_qrs_width_amplitude_crossing`) -- see that function's docstring for
+    why the derivative-threshold walk was unreliable specifically for
+    width. Operates on the SAME normalized window passed to
+    `_morphological_features`/`_wavelet_features`, at TARGET_FS (both
+    training, via `_load_record_beats`, and runtime inference, via
+    `ECGPipeline.run`, resample to TARGET_FS before beat segmentation --
+    see `to_target_rate` call sites -- so this fixed `fs` default is valid
+    for both code paths, not just one)."""
+    r_idx = primary_pre_samples
+    lo = max(0, r_idx - search_radius_samples)
+    hi = min(len(window), r_idx + search_radius_samples)
+    d = np.diff(window)  # d[i] = window[i+1] - window[i], len(window)-1
+
+    pre_d = d[lo:r_idx] if r_idx > lo else np.array([0.0])
+    post_d = d[r_idx:hi - 1] if hi - 1 > r_idx else np.array([0.0])
+    slope_pre_r = float(np.max(pre_d)) if len(pre_d) else 0.0
+    slope_post_r = float(np.min(post_d)) if len(post_d) else 0.0
+
+    local_d = d[lo:hi - 1] if hi - 1 > lo else np.array([0.0])
+    peak_abs = float(np.max(np.abs(local_d))) if len(local_d) else 0.0
+    threshold = 0.1 * peak_abs
+
+    onset, offset = lo, hi - 1
+    if peak_abs > 1e-9:
+        for i in range(r_idx - 1, lo - 1, -1):
+            if abs(d[i]) < threshold:
+                onset = i
+                break
+        for i in range(r_idx, hi - 1):
+            if abs(d[i]) < threshold:
+                offset = i
+                break
+    onset, offset = min(onset, r_idx), max(offset, r_idx)
+    qrs_abs_area = float(np.sum(np.abs(window[onset:offset + 1])))
+
+    width_radius_samples = int(round(width_radius_ms / 1000.0 * fs))
+    qrs_width_ms = _qrs_width_amplitude_crossing(window, r_idx, fs, fraction=width_fraction,
+                                                  width_radius_samples=width_radius_samples)
+    return np.array([qrs_width_ms, qrs_abs_area, slope_pre_r, slope_post_r])
+
+
 def beat_feature_vector(beat: Beat, primary_pre_samples: int,
                          include_timing: bool = False,
                          drop_compensatory_pause: bool = False,
                          timing_only: bool = False,
-                         include_r_amp: bool = False) -> np.ndarray | None:
+                         include_r_amp: bool = False,
+                         include_qrs_shape: bool = False) -> np.ndarray | None:
     """Step 6 of the filter chain (robust Z-score, per beat window) is
     applied here, right before feature extraction — quality rejection
     upstream (`beats.py`) intentionally runs on the raw window instead, so
@@ -1180,7 +1289,12 @@ def beat_feature_vector(beat: Beat, primary_pre_samples: int,
     every previously-established index (0-55, or 0-62 with timing) keeps
     its exact original meaning -- inserting it earlier, between morphology
     and wavelet, was tried first and shifted every wavelet index by one;
-    caught by the train/inference parity check.
+    caught by the train/inference parity check. `include_qrs_shape=True`
+    appends `_qrs_shape_features` (4: qrs_width_ms, qrs_abs_area,
+    slope_pre_r, slope_post_r) at the very end, after r_amp -- same
+    append-only reasoning, so turning it on cannot shift any existing
+    column (0-55, 0-62 w/ timing, or 63 w/ r_amp) regardless of which other
+    flags are combined.
     """
     if beat.primary_window is None or beat.quality_rejected:
         return None
@@ -1194,6 +1308,8 @@ def beat_feature_vector(beat: Beat, primary_pre_samples: int,
         parts.append(_timing_features(beat, drop_compensatory_pause=drop_compensatory_pause))
     if include_r_amp:
         parts.append(_r_amp_feature(normalized, primary_pre_samples))
+    if include_qrs_shape:
+        parts.append(_qrs_shape_features(normalized, primary_pre_samples))
     return np.concatenate(parts)
 
 
@@ -1201,7 +1317,8 @@ def batch_feature_matrix(beats: list[Beat], primary_pre_samples: int,
                           include_timing: bool = False,
                           drop_compensatory_pause: bool = False,
                           timing_only: bool = False,
-                          include_r_amp: bool = False) -> tuple[np.ndarray, list[int]]:
+                          include_r_amp: bool = False,
+                          include_qrs_shape: bool = False) -> tuple[np.ndarray, list[int]]:
     """Returns (feature_matrix, indices_into_beats_used) — skipping
     rejected/out-of-bounds beats but preserving which original beat each
     row corresponds to."""
@@ -1209,13 +1326,14 @@ def batch_feature_matrix(beats: list[Beat], primary_pre_samples: int,
     for i, beat in enumerate(beats):
         vec = beat_feature_vector(beat, primary_pre_samples, include_timing=include_timing,
                                    drop_compensatory_pause=drop_compensatory_pause,
-                                   timing_only=timing_only, include_r_amp=include_r_amp)
+                                   timing_only=timing_only, include_r_amp=include_r_amp,
+                                   include_qrs_shape=include_qrs_shape)
         if vec is not None:
             rows.append(vec)
             idxs.append(i)
     if not rows:
         return np.zeros((0, _feature_width(include_timing, drop_compensatory_pause,
-                                            timing_only, include_r_amp))), []
+                                            timing_only, include_r_amp, include_qrs_shape))), []
     return np.vstack(rows), idxs
 
 
@@ -1627,13 +1745,14 @@ class RhythmContextEngine:
     def __init__(self, vt_run_beats: int = RISK.vt_run_beats):
         self.vt_run_beats = vt_run_beats
 
-    def analyze(self, labels: list[str], rr_ms: list[float | None]) -> list[RhythmFinding]:
+    def analyze(self, labels: list[str], rr_ms: list[float | None]) -> tuple[list[RhythmFinding], int]:
         findings: list[RhythmFinding] = []
         findings += self._vt_runs(labels)
         findings += self._geminy(labels, pattern=["N", "V"], min_repeats=4, kind="BIGEMINY")
         findings += self._geminy(labels, pattern=["N", "N", "V"], min_repeats=3, kind="TRIGEMINY")
-        findings += self._afib_suspected(rr_ms)
-        return findings
+        afib_findings, n_afib_windows_examined = self._afib_suspected(rr_ms)
+        findings += afib_findings
+        return findings, n_afib_windows_examined
 
     def _vt_runs(self, labels: list[str]) -> list[RhythmFinding]:
         findings, run_start, run_len = [], None, 0
@@ -1667,23 +1786,34 @@ class RhythmContextEngine:
         return findings
 
     def _afib_suspected(self, rr_ms: list[float | None], window: int = 20,
-                         cv_threshold: float = 0.15) -> list[RhythmFinding]:
+                         cv_threshold: float = 0.15) -> tuple[list[RhythmFinding], int]:
         """AFib is a RHYTHM finding computed here from RR irregularity —
         never treated as a quality defect (recommendation #6). High RR
         coefficient-of-variation over a rolling window suggests AFib,
         distinct from motion-artefact noise which the stage-2 SQI gate
-        already screened out via morphology, not RR timing.
+        already screened out via morphology, not RR timing. The caller
+        is expected to have already excluded physiologically-implausible
+        RR intervals (`Beat.rr_flagged`, e.g. from a missed R-peak across
+        a noisy/rejected stretch) by passing `None` in their place — the
+        same filter `recording_level_hrv()` applies for SDNN — otherwise
+        a missed-beat gap reads as a false rhythm irregularity here.
+
+        Returns (findings, n_windows_examined): the caller needs the
+        total window count, not just the flagged ones, to compute AFib
+        burden as a genuine percentage of windows examined.
         """
         findings = []
+        n_windows_examined = 0
         clean_rr = [r for r in rr_ms if r is not None]
         for start in range(0, max(0, len(clean_rr) - window), window):
             chunk = np.array(clean_rr[start:start + window])
             if len(chunk) < window:
                 continue
+            n_windows_examined += 1
             cv = float(np.std(chunk) / np.mean(chunk)) if np.mean(chunk) > 0 else 0.0
             if cv > cv_threshold:
                 findings.append(RhythmFinding("AFIB_SUSPECTED", start, start + window - 1, {"rr_cv": cv}))
-        return findings
+        return findings, n_windows_examined
 
 
 # ============================================================================
@@ -1725,14 +1855,19 @@ class RiskReport:
 
 def score_recording(labels: list[str], findings: list[RhythmFinding], hrv: dict,
                      news2_score: int | None = None, qsofa_score: int | None = None,
-                     thresholds=RISK) -> RiskReport:
+                     thresholds=RISK, afib_windows_examined: int | None = None) -> RiskReport:
     n = max(1, len(labels))
     pvc_burden = 100.0 * sum(1 for l in labels if l == "V") / n
     pac_burden = 100.0 * sum(1 for l in labels if l == "S") / n
     vt_runs = sum(1 for f in findings if f.kind == "VT_RUN")
     afib_windows = [f for f in findings if f.kind == "AFIB_SUSPECTED"]
-    afib_burden = 100.0 * len(afib_windows) / max(1, len(findings)) if findings else (
-        100.0 if afib_windows else 0.0)
+    # Percentage of AFib-flagged windows out of windows actually examined. Old
+    # callers that don't pass afib_windows_examined fall back to len(findings)
+    # (all rhythm-finding kinds combined) -- the previous, incorrect denominator
+    # -- which reproduces the exact old behavior bit-for-bit rather than silently
+    # changing it for any caller this patch didn't also update.
+    denominator = afib_windows_examined if afib_windows_examined is not None else len(findings)
+    afib_burden = 100.0 * len(afib_windows) / max(1, denominator)
     sdnn_ms = hrv.get("sdnn_ms", 0.0)
     hrv_suppressed = sdnn_ms < thresholds.hrv_sdnn_suppressed_ms
 
@@ -2225,14 +2360,19 @@ class ECGPipeline:
             result = self.classifier.predict_one(feat_lookup.get(i), beat, mean_rr)
             labels.append(result.label)
             classifier_sources.add(result.source)
-        rr_list = [b.rr_post_ms for b in beats]
-        rhythm_findings = self.rhythm_engine.analyze(labels, rr_list)
+        # rr_flagged beats (physiologically-implausible RR, e.g. a missed R-peak
+        # across a noisy/rejected stretch) are excluded here, same as
+        # recording_level_hrv() already does for SDNN -- otherwise a missed-beat
+        # gap of several seconds reads as false rhythm irregularity below.
+        rr_list = [b.rr_post_ms if not b.rr_flagged else None for b in beats]
+        rhythm_findings, n_afib_windows_examined = self.rhythm_engine.analyze(labels, rr_list)
         audit.append("STAGE7_CLASSIFY", {"classifier_sources": sorted(classifier_sources),
                                           "classifier_trained": self.classifier.is_trained,
                                           "rhythm_findings": [f.kind for f in rhythm_findings]})
 
         # Stage 8: risk scoring + conformal + temporal
-        risk_report = score_recording(labels, rhythm_findings, hrv, news2_score, qsofa_score)
+        risk_report = score_recording(labels, rhythm_findings, hrv, news2_score, qsofa_score,
+                                       afib_windows_examined=n_afib_windows_examined)
         audit.append("STAGE8_RISK", {"alert_level": risk_report.alert_level, "reasons": risk_report.alert_reasons})
 
         self.temporal_tracker.record(recording.patient_id, float(t_resampled[-1]) if len(t_resampled) else 0.0,

@@ -1002,8 +1002,33 @@ def segment_beats(signal: np.ndarray, fs: float, r_peaks: np.ndarray,
     return beats
 
 
+def _snap_to_local_peak(signal: np.ndarray, r_peaks: np.ndarray, search_radius: int = 15) -> np.ndarray:
+    """XQRS-detected indices land close to but not always exactly on the
+    true sample-wise |amplitude| local max (empirically ~3 samples off on
+    resampled WFDB data -- see the training path's identical helper in
+    ecg_pipeline_tools._snap_to_local_peak, which this mirrors). That small
+    offset is enough to fail _beat_level_sqi's R_PEAK_NOT_LOCAL_MAX check,
+    which looks for the true local max within a much narrower +/-3 sample
+    window than this snap's search radius -- confirmed as the dominant
+    cause of beat-level over-culling on WFDB (1400-2400 beats/record
+    rejected via this one reason before this snap was added). Snapping
+    first makes detection agree with what that check expects, rather than
+    loosening the check itself.
+    """
+    if len(r_peaks) == 0:
+        return r_peaks
+    snapped = r_peaks.copy()
+    for i, r in enumerate(r_peaks):
+        lo, hi = max(0, r - search_radius), min(len(signal), r + search_radius)
+        if hi <= lo:
+            continue
+        snapped[i] = lo + int(np.argmax(np.abs(signal[lo:hi])))
+    return snapped
+
+
 def detect_and_segment(signal: np.ndarray, fs: float, cfg: BeatWindowConfig = BEATS) -> list[Beat]:
     r_peaks = detect_r_peaks(signal, fs)
+    r_peaks = _snap_to_local_peak(signal, r_peaks)
     return segment_beats(signal, fs, r_peaks, cfg)
 
 

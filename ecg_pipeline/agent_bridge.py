@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import re
 import sys
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -432,18 +433,44 @@ into a clinician-facing narrative. A rule cascade computed the risk level below 
 You do not decide it. You may only ESCALATE it, never lower it.
 
 STRICT RULES:
-1. Use ONLY numbers, counts, and thresholds that appear in the JSON below. Never invent, estimate, or \
-   recompute a number that isn't already there.
-2. Quote the "deciding_rule" verbatim: its condition, measured_value, and threshold.
-3. List supporting findings using ONLY numbers from rule_trace / rhythm_findings / beat_summary.
-4. State the "confidence" field's statement and, if beat_summary marks S or F as LOW confidence and the \
-   deciding rule depends on them, say so explicitly.
+1. Use ONLY numbers, counts, and thresholds that appear below. Never invent, estimate, or recompute a \
+   number that isn't already there.
+2. Every rule below already has its comparison verdict computed for you ("EXCEEDS" or "does NOT exceed"). \
+   Copy that verdict verbatim. NEVER decide for yourself whether a measured value crosses a threshold, and \
+   NEVER say a value "exceeds"/"crosses" its threshold unless the line below already says EXCEEDS. If a \
+   line says "does NOT exceed", you must not describe it as exceeding, triggering, or crossing anything.
+3. Quote the deciding rule's condition and its already-computed verdict, not your own comparison.
+4. If beat_summary marks a class (S or F) as LOW confidence and the deciding rule depends on it, say so \
+   explicitly.
 5. Frame any next step as decision-support ("clinician review suggested"), never as a diagnosis or a \
    treatment instruction.
 6. If you believe the level should be raised given the evidence, say so explicitly via "escalate": true \
    and a reason. You may never set "escalate" to lower the level.
 
-## Structured RiskReport JSON (the only source of numbers you may use)
+## Beat classification summary (counts already computed -- use these numbers)
+{beat_summary_block}
+
+## Rhythm findings (already detected -- use these as-is)
+{rhythm_findings_block}
+
+## Rule cascade status (verdict already computed for every rule -- copy verbatim, do not recompute)
+{rule_status_block}
+
+## Deciding rule (this is the one that set the risk level)
+{deciding_rule_block}
+
+## Final deterministic risk level
+{risk_level}
+
+## Required narrative structure -- cover ALL five points below, in this order
+(a) Beat summary: state each class's count/percentage from the block above, including the S/F \
+    low-confidence caveat if either appears.
+(b) Rhythm findings: describe each finding above (or state plainly that none were found).
+(c) Deciding rule: state its real value(s) vs threshold(s) and its verdict, copied verbatim from above.
+(d) Final risk level: state it plainly.
+(e) End with exactly: "Clinician review suggested -- this is decision support, not a diagnosis."
+
+## Full structured RiskReport JSON (reference only, for any additional detail -- same numbers as above)
 {report_json}
 
 ## Required output format
@@ -453,8 +480,76 @@ Give brief reasoning, then a final JSON object of the form:
 """
 
 
+def _fmt_num(v) -> str:
+    if isinstance(v, bool):
+        return str(v)
+    if isinstance(v, float):
+        return str(round(v, 3))
+    return str(v)
+
+
+def _rule_verdict_line(rule: dict) -> str:
+    """Pre-computes the exceeds/does-not-exceed verdict in Python (matching
+    score_recording's own strict `>` comparisons exactly) so MedGemma only
+    has to copy a verdict, never infer one -- this is what closes the
+    "PAC burden 8.642 exceeds 15.0" defect: the model was doing its own
+    (wrong) arithmetic because the prompt only gave it raw numbers."""
+    condition = rule["condition"]
+    fired = rule.get("fired")
+    measured = rule.get("measured_value")
+    threshold = rule.get("threshold")
+    if rule.get("evaluated") is False:
+        return f"- {condition}: NOT EVALUATED (no input score supplied) -> fired=False"
+    if isinstance(measured, dict) and isinstance(threshold, dict):
+        parts = []
+        for k, m in measured.items():
+            t = threshold.get(k)
+            if not isinstance(m, (int, float)) or not isinstance(t, (int, float)):
+                continue
+            verdict = "EXCEEDS" if m > t else "does NOT exceed"
+            parts.append(f"{k}={_fmt_num(m)} vs its threshold {_fmt_num(t)} -> {verdict}")
+        detail = "; ".join(parts)
+        overall = "EXCEEDS (fired=True)" if fired else "does NOT exceed (fired=False)"
+        return f"- {condition}:\n    {detail}\n    overall -> {overall}"
+    if isinstance(measured, (int, float)) and isinstance(threshold, (int, float)):
+        verdict = "EXCEEDS" if fired else "does NOT exceed"
+        return f"- {condition}: measured {_fmt_num(measured)} vs threshold {_fmt_num(threshold)} -> {verdict} (fired={fired})"
+    return f"- {condition}: fired={fired}"
+
+
+def _render_rule_status_block(rule_trace: list[dict]) -> str:
+    return "\n".join(_rule_verdict_line(r) for r in rule_trace) or "(no rules evaluated)"
+
+
+def _render_beat_summary_block(beat_summary: dict) -> str:
+    lines = []
+    for cls, info in beat_summary.items():
+        caveat = f" [{info['confidence']} CONFIDENCE -- {info['note']}]" if info.get("confidence") == "LOW" else ""
+        lines.append(f"- {cls}: {info['count']} beats ({_fmt_num(info['pct_of_analyzed_beats'])}% "
+                      f"of analyzed beats){caveat}")
+    return "\n".join(lines) if lines else "(no beats survived quality gating)"
+
+
+def _render_rhythm_findings_block(rhythm_findings: list[dict]) -> str:
+    if not rhythm_findings:
+        return "(none detected)"
+    lines = []
+    for f in rhythm_findings:
+        lines.append(f"- {f['kind']}: beats {f['start_beat_idx']}-{f['end_beat_idx']} "
+                      f"(starts at {_fmt_num(f['start_time_s'])}s, duration {_fmt_num(f['duration_s'])}s) "
+                      f"-- {f['evidence_text']}")
+    return "\n".join(lines)
+
+
 def build_transparency_prompt(report_json: dict) -> str:
-    return TRANSPARENCY_PROMPT_TEMPLATE.format(report_json=json.dumps(report_json, indent=2, default=str))
+    return TRANSPARENCY_PROMPT_TEMPLATE.format(
+        beat_summary_block=_render_beat_summary_block(report_json.get("beat_summary", {})),
+        rhythm_findings_block=_render_rhythm_findings_block(report_json.get("rhythm_findings", [])),
+        rule_status_block=_render_rule_status_block(report_json.get("rule_trace", [])),
+        deciding_rule_block=_rule_verdict_line(report_json["deciding_rule"]),
+        risk_level=report_json["risk_level"],
+        report_json=json.dumps(report_json, indent=2, default=str),
+    )
 
 
 def _deterministic_narrative(report_json: dict, header: str = "") -> str:
@@ -517,10 +612,84 @@ def render_narrative(report_json: dict, risk_report: RiskReport, audit: AuditLog
                 "final_risk_level": merged.final_decision["risk_level"],
                 "endpoint": OLLAMA_URL, "model": MEDGEMMA_MODEL}
 
-    narrative = merged.final_decision.get("narrative") or _deterministic_narrative(report_json)
+    llm_narrative = merged.final_decision.get("narrative") or ""
+    if llm_narrative and _narrative_asserts_false_exceed(llm_narrative, report_json.get("rule_trace", [])):
+        audit.append("MEDGEMMA_NARRATIVE_FALSE_EXCEED_CLAIM_FILTERED",
+                      {"reason": "free text asserted an 'exceeds' comparison for a rule with fired=False",
+                       "raw_narrative": llm_narrative})
+        llm_narrative = ""
+    # Always route through the deterministic (a)-(e) composition -- even
+    # when llm_narrative was filtered to "" above, this still guarantees
+    # beat_summary/rhythm_findings/deciding_rule/risk_level/disclaimer are
+    # present; only the free-text "Clinical interpretation" section is
+    # dropped, per _compose_structured_narrative's own empty-string check.
+    narrative = _compose_structured_narrative(report_json, llm_narrative)
     return {"narrative": narrative, "medgemma_status": "ACCEPTED",
             "final_risk_level": merged.final_decision["risk_level"],
             "endpoint": OLLAMA_URL, "model": MEDGEMMA_MODEL}
+
+
+_EXCEED_WORDS = ("exceed", "cross", "trigger", "surpass")
+_NEGATION_WINDOW = ("not ", "n't ", "no ", "below", "under", "less than", "does not", "did not")
+
+
+def _narrative_asserts_false_exceed(text: str, rule_trace: list[dict]) -> bool:
+    """Even when the prompt hands the model the correct verdict, its own
+    free-text sometimes still independently asserts "X exceeds Y" for a rule
+    that did NOT fire (observed directly: "PAC burden is at 8.642%, which
+    exceeds the HIGH threshold of 15.0%" -- false, 8.642 < 15.0). The
+    deterministic wrapper in _compose_structured_narrative can't fix wording
+    inside the model's own sentences, so this scans for that specific
+    failure mode and lets the caller drop the free text rather than save a
+    false clinical claim."""
+    text_lower = text.lower()
+    for rule in rule_trace:
+        if rule.get("fired") is not False or rule.get("evaluated") is False:
+            continue
+        measured = rule.get("measured_value")
+        values = list(measured.values()) if isinstance(measured, dict) else [measured]
+        for v in values:
+            if not isinstance(v, (int, float)) or isinstance(v, bool) or float(v) in (0.0, 1.0):
+                continue
+            for rep in {str(v), str(round(float(v), 1)), str(round(float(v), 2)), str(int(v)) if float(v).is_integer() else None}:
+                if not rep:
+                    continue
+                for m in re.finditer(r'(?<![\d.])' + re.escape(rep) + r'(?![\d.])', text_lower):
+                    window = text_lower[max(0, m.start() - 50):m.end() + 50]
+                    if any(w in window for w in _EXCEED_WORDS) and not any(n in window for n in _NEGATION_WINDOW):
+                        return True
+    return False
+
+
+def _compose_structured_narrative(report_json: dict, llm_narrative: str) -> str:
+    """Wraps MedGemma's own free-text narrative with the (a)-(e) structure
+    deterministically, instead of trusting a 4B local model to reproduce it
+    every time across a batch of hundreds of segments. The prompt already
+    asks for this structure and pre-computed verdicts; this guarantees it
+    lands even when the model's compliance is inconsistent (observed: beat
+    counts and the closing disclaimer were both sometimes dropped across
+    repeated calls on the same input). MedGemma's own sentence(s) are kept
+    verbatim as the "clinical interpretation" -- nothing it wrote is
+    discarded, only wrapped."""
+    deciding = report_json["deciding_rule"]
+    parts = [
+        f"Beat summary:\n{_render_beat_summary_block(report_json.get('beat_summary', {}))}",
+        f"Rhythm findings:\n{_render_rhythm_findings_block(report_json.get('rhythm_findings', []))}",
+        f"Deciding rule: {_rule_verdict_line(deciding)}",
+        f"Final risk level: {report_json['risk_level']}",
+    ]
+    # The model sometimes echoes the closing disclaimer itself (rule 5 of the
+    # prompt asks for it); strip a trailing copy so the deterministic footer
+    # below isn't printed twice.
+    disclaimer = "clinician review suggested -- this is decision support, not a diagnosis."
+    clean_llm_narrative = llm_narrative.strip()
+    if clean_llm_narrative.lower().rstrip(".").endswith(disclaimer.rstrip(".")):
+        clean_llm_narrative = clean_llm_narrative[:clean_llm_narrative.lower().rindex(
+            disclaimer.split(" -- ")[0].lower())].strip().rstrip(".").strip()
+    if clean_llm_narrative:
+        parts.append(f"Clinical interpretation: {clean_llm_narrative}")
+    parts.append("Clinician review suggested -- this is decision support, not a diagnosis.")
+    return "\n\n".join(parts)
 
 
 def run_full_report(recording: Recording, classifier: FiveClassBeatClassifier) -> tuple[dict, PipelineResult]:
@@ -536,6 +705,38 @@ def run_full_report(recording: Recording, classifier: FiveClassBeatClassifier) -
                                 "model": render["model"]}
     report_json["final_risk_level"] = render["final_risk_level"]
     return report_json, result
+
+
+def render_report_markdown(report_json: dict) -> str:
+    """Human-readable companion to the saved JSON report -- just the
+    clinical report prose plus enough of a header to identify which
+    recording it's for, for showing a report without reading JSON."""
+    r = report_json["recording"]
+    lines = [
+        f"# ECG Clinical Report -- {r['source']} / {r['patient_id']} / {r['segment_id']}",
+        "",
+        f"- Duration: {r['duration_s']}s",
+        f"- Beats detected / analyzed: {r['n_beats_detected']} / {r['n_beats_analyzed']}",
+        f"- Assessable: {report_json['assessable']}",
+        f"- Final risk level: {report_json['final_risk_level']}",
+        f"- MedGemma status: {report_json['medgemma']['status']}",
+        "",
+        "---",
+        "",
+        report_json["narrative"],
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def save_report(report_json: dict, out_dir: Path, segment_id: str) -> tuple[Path, Path]:
+    """Writes both the structured JSON and the human-readable .md companion
+    for one segment, returning (json_path, md_path)."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    json_path = out_dir / f"{segment_id}.json"
+    md_path = out_dir / f"{segment_id}.md"
+    json_path.write_text(json.dumps(report_json, indent=2, default=str))
+    md_path.write_text(render_report_markdown(report_json))
+    return json_path, md_path
 
 
 # ============================================================================

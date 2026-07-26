@@ -535,6 +535,14 @@ def _morphology_kurtosis(x: np.ndarray) -> float:
     and a perfectly irregular but clean AFib signal can both have "normal"
     RR patterns or not — this metric only asks whether the waveform shape
     has the sharp/peaky character of real QRS complexes.
+
+    Caller passes a copy already band-limited to the physiological ECG band
+    (see evaluate_window) rather than the fully raw window — on SeNSiO's raw
+    "ECG" channel, a dominant near-Nyquist artifact (more spectral power
+    above 40Hz than below, confirmed by FFT) swamps the raw amplitude
+    distribution and reads as kurtosis ~ -1 (near-uniform) even when real
+    QRS structure is present underneath; band-limiting first recovers the
+    true impulse character (same window: -1.0 raw -> 1.8 band-limited).
     """
     x = x[~np.isnan(x)]
     if len(x) < 8:
@@ -593,14 +601,46 @@ def evaluate_window(x: np.ndarray, t_ms: np.ndarray, fs: float,
     # which needs real railing/dropout/shape, not a detrended view.
     x_valid = x[~np.isnan(x)]
     x_scoring = highpass_residual(x_valid, fs, cutoff_hz=0.5) if len(x_valid) >= 9 else x_valid
+    # Same 0.5-40Hz physiological band Stage 4 and _snr_db already trust,
+    # applied once here so kurtosis judges QRS shape instead of whatever
+    # out-of-band artifact happens to dominate this device's raw channel
+    # (see _morphology_kurtosis docstring). filtfilt via bandpass() needs a
+    # few dozen samples to be stable; too-short windows fall back to
+    # x_scoring same as the wander/SNR metrics do.
+    x_band = bandpass(x_valid, fs, FILTER.bandpass_low_hz, FILTER.bandpass_high_hz,
+                       FILTER.bandpass_order) if len(x_valid) >= 20 else x_scoring
+
+    # snr_db's "noise" is literally everything outside 0.5-40Hz, i.e. a
+    # sliver from bandpass_high_hz up to this window's own Nyquist. For a
+    # native rate close to 2x bandpass_high_hz (SeNSiO's 100Hz -> Nyquist
+    # 50Hz) that sliver is only a few Hz wide and sits exactly where the
+    # mains notch (50Hz) is mathematically invalid (powerline_notch()
+    # no-ops once notch_hz >= Nyquist) -- so any near-Nyquist artifact in
+    # that narrow band reads as overwhelming "noise" even though Stage 3
+    # resamples to TARGET_FS and Stage 4's notch/bandpass remove exactly
+    # this before the signal ever reaches R-peak detection. Score snr_db on
+    # a copy upsampled to TARGET_FS first -- the same resample Stage 3
+    # already performs -- so the noise band gets the same headroom the real
+    # signal path will have, and the notch can actually run. Only kicks in
+    # when the native rate itself can't support the notch; WFDB/VitalPatch
+    # (already >= TARGET_FS) are untouched.
+    x_snr_scoring = x_scoring
+    if fs / 2.0 <= FILTER.notch_hz and len(x_valid) >= 9:
+        valid_mask = ~np.isnan(x)
+        t_valid = t_ms[valid_mask] if len(t_ms) == len(x) else \
+            np.arange(len(x_valid)) * (1000.0 / fs)
+        x_resampled, _ = resample_linear(x_valid, t_valid, TARGET_FS)
+        if len(x_resampled) >= 9:
+            x_snr_scoring = powerline_notch(
+                highpass_residual(x_resampled, TARGET_FS, cutoff_hz=0.5), TARGET_FS)
 
     metrics = {
         "flatline_frac": _flatline_frac(x, fs, thresholds.flatline_run_ms),
         "clipping_frac": _clipping_frac(x, fs, thresholds.clipping_run_ms, clip_value),
         "missing_frac": _missing_frac(x),
-        "morphology_kurtosis": _morphology_kurtosis(x),
+        "morphology_kurtosis": _morphology_kurtosis(x_band),
         "baseline_wander_ratio": _baseline_wander_ratio(x_scoring, fs),
-        "snr_db": _snr_db(x_scoring, fs),
+        "snr_db": _snr_db(x_snr_scoring, fs if x_snr_scoring is x_scoring else TARGET_FS),
     }
 
     reject_code = None
@@ -2235,7 +2275,11 @@ def call_medgemma(prompt: str, model: str = MEDGEMMA_MODEL, timeout_s: float = 1
 
     try:
         json_start = text.rindex("{")
-        parsed = json.loads(text[json_start:])
+        # raw_decode stops at the JSON value's matching closing brace instead of
+        # requiring the rest of the string to parse too -- MedGemma wraps its
+        # JSON answer in a ```json ... ``` markdown fence, and a naive
+        # json.loads(text[json_start:]) chokes on the trailing ``` as "Extra data".
+        parsed, _end = json.JSONDecoder().raw_decode(text, json_start)
         parsed["_raw_reasoning"] = text[:json_start].strip()
         return parsed
     except (ValueError, json.JSONDecodeError):

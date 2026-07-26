@@ -19,7 +19,7 @@ import traceback
 from collections import Counter
 from pathlib import Path
 
-from ecg_pipeline.agent_bridge import load_classifier, run_full_report
+from ecg_pipeline.agent_bridge import load_classifier, run_full_report, save_report
 from ecg_pipeline.ecg_pipeline_core import DATA_RAW, MODELS_DIR, discover_vitalpatch_files, parse_vitalpatch_ecg
 
 DATA_REPORTS = DATA_RAW.parent / "reports" / "vitalpatch"
@@ -57,6 +57,35 @@ def run_batch(vitalpatch_root: Path, classifier_path: Path, out_dir: Path,
 
     for i, f in enumerate(files, 1):
         patient_id = f.parent.name.replace("Patch_", "")
+        patient_out_dir = out_dir / patient_id
+
+        # Resume support: this loop can run for hours over 2375 files and has
+        # already been killed mid-run once by session teardown outside our
+        # control. parse+run is a deterministic function of the raw file, so
+        # if any segment JSON for this file's stem already exists, reload its
+        # manifest row instead of re-parsing/re-running (which would also
+        # burn a real, serialized MedGemma call for no new information).
+        existing = sorted(patient_out_dir.glob(f"{f.stem}_seg*.json")) if patient_out_dir.exists() else []
+        if existing:
+            n_files_ok += 1
+            for ep in existing:
+                n_segments += 1
+                rj = json.loads(ep.read_text())
+                rows.append({
+                    "patient_id": patient_id, "segment_id": rj["recording"]["segment_id"], "source": "vitalpatch",
+                    "duration_s": rj["recording"]["duration_s"], "n_beats_detected": rj["recording"]["n_beats_detected"],
+                    "n_beats_analyzed": rj["recording"]["n_beats_analyzed"], "quality_score": rj["recording"]["quality_score"],
+                    "sqi_window_rejection_rate": rj["recording"]["sqi_window_rejection_rate"],
+                    "assessable": rj["assessable"], "final_risk_level": rj["final_risk_level"],
+                    "n_rhythm_findings": len(rj["rhythm_findings"]), "has_afib_vt_pvc_finding": _notable_finding(rj),
+                    "medgemma_status": rj["medgemma"]["status"], "error": None,
+                })
+            if i % progress_every == 0 or i == len(files):
+                elapsed = time.time() - start
+                print(f"[{i}/{len(files)} files, {n_segments} segments so far -- resumed] "
+                      f"elapsed={elapsed:.1f}s ({i/elapsed:.1f} files/s)")
+            continue
+
         try:
             recordings = parse_vitalpatch_ecg(f)
         except Exception as e:
@@ -87,10 +116,7 @@ def run_batch(vitalpatch_root: Path, classifier_path: Path, out_dir: Path,
                 })
                 continue
 
-            patient_out_dir = out_dir / patient_id
-            patient_out_dir.mkdir(parents=True, exist_ok=True)
-            out_path = patient_out_dir / f"{recording.segment_id}.json"
-            out_path.write_text(json.dumps(report_json, indent=2, default=str))
+            save_report(report_json, patient_out_dir, recording.segment_id)
 
             rows.append({
                 "patient_id": patient_id,

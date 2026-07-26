@@ -11,6 +11,15 @@ thresholds, or the AAMI 5-class scheme — every fix below is either in the
 signal path *before* the classifier ever sees a beat, or in the narrative
 *after* the risk decision has already been made.
 
+> **New here? Start with [`PROJECT_OVERVIEW.md`](PROJECT_OVERVIEW.md)
+> instead.** It's a plain-English writeup of this whole project — what an
+> ECG and a "beat" are, why the problem is hard, the real classifier
+> results with every number cited to the file it came from, what was
+> tried and rejected to fix the weak classes, and honest limitations. No
+> ML or ECG background assumed. This README below is the engineering
+> reference (what changed, where, and why) for people already familiar
+> with the codebase.
+
 ## Pipeline stages
 
 ```

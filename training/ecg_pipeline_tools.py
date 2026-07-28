@@ -43,7 +43,7 @@ import wfdb
 from sklearn.metrics import confusion_matrix, f1_score, precision_recall_fscore_support
 from sklearn.utils.class_weight import compute_sample_weight
 
-from .ecg_pipeline_core import (
+from ecg_pipeline.ecg_pipeline_core import (
     AAMI_CLASSES, BEATS, DATA_RAW, MODELS_DIR, TARGET_FS,
     ConformalRiskPredictor, FiveClassBeatClassifier, INPUT_LEN, PretrainResult,
     N_FEATURES, N_FEATURES_WITH_TIMING, TIMING_FEATURE_NAMES, _feature_width,

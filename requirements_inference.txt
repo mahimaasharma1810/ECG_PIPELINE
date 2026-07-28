@@ -1,0 +1,15 @@
+# Runtime dependencies for the ecg_inference package + run_inference.py.
+# Pinned to the versions verified during the inference-ready packaging pass
+# (see inference_ready.md). Deliberately excludes torch: the only code that
+# needed it (the self-supervised encoder, encoder.py) is dead in every
+# production path and was excluded from ecg_inference -- see
+# ecg_inference/pipeline.py's ECGPipeline.__init__ docstring.
+
+numpy==1.26.4
+pandas==2.3.3
+scipy==1.15.3
+xgboost==3.2.0
+scikit-learn==1.7.2
+PyWavelets==1.8.0
+requests==2.25.1
+wfdb==4.3.1

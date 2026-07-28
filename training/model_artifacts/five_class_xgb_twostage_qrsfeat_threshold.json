@@ -1,5 +1,0 @@
-{
-  "threshold": 0.05,
-  "reused_from": "/home2/mahimakopalley/projects/ecg_pipeline/models/five_class_xgb_twostage_beatonly_stage1.json",
-  "note": "Stage 1 and threshold are REUSED, not retrained -- single-variable comparison isolating Stage 2's feature set only."
-}

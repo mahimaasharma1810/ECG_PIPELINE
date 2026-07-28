@@ -1,14 +1,15 @@
 # ECG Pipeline — Code Guide
 
-This README documents what's actually inside the two runnable files in
-this directory: **`ecg_pipeline_core.py`** (the 9-stage ECG processing
-pipeline) and **`ecg_pipeline_tools.py`** (everything needed to acquire
-data and train the models the pipeline uses). Each was assembled by
+This README documents what's actually inside **`ecg_pipeline_core.py`**
+(the 9-stage ECG processing pipeline, in this directory) and
+**`ecg_pipeline_tools.py`** (everything needed to acquire data and train
+the models the pipeline uses — moved to the top-level `training/`
+directory 2026-07-28, see the root `README.md`). Each was assembled by
 merging several smaller modules into one file; this doc walks through
 them section by section so you don't have to open every function to
 find your way around. For the project-level story (why this exists,
-what changed vs. the old baseline, known limitations) see
-`Docs/README.md`.
+what changed vs. the old baseline, known limitations) see the root
+[`README.md`](../README.md).
 
 Both files are plain Python modules inside the `ecg_pipeline` package —
 run them with `python -m ecg_pipeline.<module_name> ...` from the
@@ -81,7 +82,7 @@ kurtosis, baseline wander, and SNR — the **first** failing check sets
 `reject_code`, and a window is dropped only if it fails one of these.
 Deliberately *not* checked here: RR-interval regularity — an irregular
 but clean AFib strip must survive this gate (that's the point of
-recommendation #6, see `Docs/README.md`). Rejected windows are logged,
+recommendation #6, see the root `README.md`). Rejected windows are logged,
 not silently dropped (`WindowVerdict.reject_code`), and RR outliers get
 picked up downstream by the rhythm classifier instead.
 

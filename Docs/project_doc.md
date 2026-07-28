@@ -7,27 +7,37 @@ decision.
 
 ## Where things are
 
+*(CORRECTION, 2026-07-28: the layout below reflects this file's original
+1844AC session. Since then, an inference-ready packaging pass moved
+`ecg_pipeline_tools.py`, `_original_stages/`, and every non-production
+model artifact — including `ecg_encoder.pt` — out of `ecg_pipeline/` and
+into a new top-level `training/` directory. See the root `README.md` for
+the current layout and `Docs/inference_ready.md` for the full move
+rationale. Paths below are historical.)*
+
 ```
 ecg_pipeline/
   ecg_pipeline_core.py    # runtime pipeline: ingest, filter, segment, features, classify, risk
-  ecg_pipeline_tools.py   # training/eval CLI: download-datasets, train-classifiers, eval-classifier
   models/
     five_class_xgb.json          # PRODUCTION model — never overwrite this
     five_class_xgb.classes.json
+training/
+  ecg_pipeline_tools.py   # training/eval CLI: download-datasets, train-classifiers, eval-classifier
+  model_artifacts/
     ecg_encoder.pt                # optional learned encoder, not used by the classifier below
+  _original_stages/       # frozen historical reference implementation, kept for diffing
 data/raw/public/          # datasets — NOT in git (too large), see "Getting the data" below
-_original_stages/         # frozen historical reference implementation, kept for diffing
 ```
 
 Run everything from `/home2/mahimakopalley/projects` as:
 ```
-python -m ecg_pipeline.ecg_pipeline_tools <subcommand> [args]
+python -m training.ecg_pipeline_tools <subcommand> [args]
 ```
 
 ## Getting the data
 
 ```
-python -m ecg_pipeline.ecg_pipeline_tools download-datasets --all
+python -m training.ecg_pipeline_tools download-datasets --all
 ```
 MITDB, SVDB, INCART, LTAFDB, SDDB, challenge2017, CUDB. `icentia11k` is
 ~257GB — download separately (`download-icentia11k-full`) only if you

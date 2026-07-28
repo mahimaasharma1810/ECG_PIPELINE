@@ -165,8 +165,25 @@ def _rhythm_findings_json(result: PipelineResult) -> list[dict]:
         elif f.kind == "TRIGEMINY":
             evidence_text = f"{f.detail['repeats']}x repeats of the N-N-V pattern (threshold: >=3 repeats)"
         elif f.kind == "AFIB_SUSPECTED":
-            evidence_text = (f"RR coefficient-of-variation {f.detail['rr_cv']:.3f} > 0.15 "
-                              f"over a 20-beat rolling window (beats {f.start_beat_idx}-{f.end_beat_idx})")
+            t0 = round(start_ms / 1000.0, 1) if start_ms is not None else None
+            t1 = round(end_ms / 1000.0, 1) if end_ms is not None else None
+            burden_pct = result.risk_report.afib_burden_pct
+            burden_thresh = RISK.afib_burden_high_pct
+            # AFIB_SUSPECTED is NOT informational-only in the real cascade -- it feeds
+            # afib_burden_pct (fraction of examined 20-beat windows flagged), which DOES
+            # raise risk to HIGH once it exceeds afib_burden_high_pct (see score_recording's
+            # "PAC burden > HIGH OR AFib burden > HIGH" rule). A single flagged window like
+            # this one genuinely does not cross that bar on its own -- stated explicitly here
+            # so a reader doesn't read "AFIB_SUSPECTED" + "risk LOW" as contradictory.
+            raised_risk = burden_pct > burden_thresh
+            effect = ("this crosses the burden threshold and raises risk to HIGH." if raised_risk else
+                      "flagged for clinician review; on its own, one flagged window does not raise the risk level.")
+            evidence_text = (
+                f"RR coefficient-of-variation {f.detail['rr_cv']:.3f} > 0.15 over a 20-beat rolling window "
+                f"(beats {f.start_beat_idx}-{f.end_beat_idx}, t={t0}-{t1}s). "
+                f"AFib burden this recording: {burden_pct:.1f}% of examined rolling windows "
+                f"(risk-raising threshold: >{burden_thresh:.1f}%) -- {effect}"
+            )
         else:
             evidence_text = str(f.detail)
 
@@ -488,6 +505,32 @@ def _fmt_num(v) -> str:
     return str(v)
 
 
+def _deciding_rule_sentence(rule: dict) -> str:
+    """Plain, reader-facing summary of the deciding rule -- unlike
+    _rule_verdict_line (dev-facing, feeds the MedGemma prompt), this never
+    prints a raw "None"/"null" for the catch-all "no thresholds exceeded"
+    rule (which genuinely has no measured_value/threshold -- it's what's
+    left when nothing else fired) and never labels that catch-all "FIRED"/
+    "fired=True", which would misleadingly imply a real threshold was
+    crossed."""
+    condition = rule["condition"]
+    measured = rule.get("measured_value")
+    threshold = rule.get("threshold")
+    if measured is None and threshold is None:
+        return f"No dangerous thresholds exceeded -> risk {rule.get('would_set_level') or 'LOW'}."
+    fired = rule.get("fired")
+    if isinstance(measured, dict) and isinstance(threshold, dict):
+        parts = [f"{k}={_fmt_num(m)} (threshold {_fmt_num(threshold.get(k))})"
+                 for k, m in measured.items()
+                 if isinstance(m, (int, float)) and isinstance(threshold.get(k), (int, float))]
+        verdict = "EXCEEDED" if fired else "not exceeded"
+        return f"{condition}: {', '.join(parts)} -> {verdict}."
+    if isinstance(measured, (int, float)) and isinstance(threshold, (int, float)):
+        verdict = "EXCEEDED" if fired else "not exceeded"
+        return f"{condition}: measured {_fmt_num(measured)} vs threshold {_fmt_num(threshold)} -> {verdict}."
+    return f"{condition}."
+
+
 def _rule_verdict_line(rule: dict) -> str:
     """Pre-computes the exceeds/does-not-exceed verdict in Python (matching
     score_recording's own strict `>` comparisons exactly) so MedGemma only
@@ -556,8 +599,7 @@ def _deterministic_narrative(report_json: dict, header: str = "") -> str:
     deciding = report_json["deciding_rule"]
     lines = [header] if header else []
     lines.append(f"Risk level: {report_json['risk_level']}.")
-    lines.append(f"Deciding rule: {deciding['condition']} -- measured {deciding['measured_value']} "
-                 f"vs threshold {deciding['threshold']} (fired={deciding['fired']}).")
+    lines.append(f"Deciding rule: {_deciding_rule_sentence(deciding)}")
     other_fired = [r for r in report_json["rule_trace"]
                    if r.get("fired") and not r.get("is_deciding_rule") and r["condition"] != deciding["condition"]]
     if other_fired:
@@ -675,7 +717,7 @@ def _compose_structured_narrative(report_json: dict, llm_narrative: str) -> str:
     parts = [
         f"Beat summary:\n{_render_beat_summary_block(report_json.get('beat_summary', {}))}",
         f"Rhythm findings:\n{_render_rhythm_findings_block(report_json.get('rhythm_findings', []))}",
-        f"Deciding rule: {_rule_verdict_line(deciding)}",
+        f"Deciding rule: {_deciding_rule_sentence(deciding)}",
         f"Final risk level: {report_json['risk_level']}",
     ]
     # The model sometimes echoes the closing disclaimer itself (rule 5 of the
@@ -764,7 +806,7 @@ def _verify_against_annotations(recording: Recording, result: PipelineResult) ->
     symbols = recording.meta.get("beat_symbols")
     if not symbols:
         return None
-    from ecg_pipeline.ecg_pipeline_tools import AAMI_SYMBOL_MAP
+    from training.ecg_pipeline_tools import AAMI_SYMBOL_MAP  # training-side module, relocated under training/
     gt_v = sum(1 for s in symbols if AAMI_SYMBOL_MAP.get(s) == "V")
     pred_v = result.beat_labels.count("V")
     return {"ground_truth_annotation_V_count": gt_v, "pipeline_predicted_V_count": pred_v,

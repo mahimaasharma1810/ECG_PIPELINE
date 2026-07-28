@@ -134,13 +134,18 @@ simply not in this map and is dropped, not miscounted.
   (~21 hours).
 - **Annotations:** unlike the other datasets, LTAFDB's clinically useful
   labels are **rhythm-interval annotations** in `aux_note` (e.g. `(AFIB`,
-  `(N`, `(VT`), not just per-beat symbols — this is what the AFib-burden
-  validation work used (`Docs/archive/ABLATION_REPORT.md`,
-  `afib_batch_ltafdb.py`), reading via `wfdb.rdann(path, "atr")` and
-  filtering `aux_note` for non-empty rhythm-change markers.
+  `(N`, `(VT`), not just per-beat symbols, read via `wfdb.rdann(path,
+  "atr")` and filtering `aux_note` for non-empty rhythm-change markers.
+  CORRECTION (2026-07-28): this entry previously claimed the AFib-burden
+  validation work already used this data via a script
+  `afib_batch_ltafdb.py` — no such file exists anywhere in the repo and no
+  matching results existed in ABLATION_REPORT.md. That claim was false.
+  The real validation was run for the first time on 2026-07-28; see
+  ABLATION_REPORT.md's "AFib rule validation" section for the actual
+  method and results (no separate script was checked in).
 - **Role:** train-only enrichment for the beat classifier (`LTAFDB_RECORDS`,
   84 records); separately, also the **ground-truth AF/Normal reference**
-  for validating the AFib-burden pipeline logic (not beat classification).
+  used for the 2026-07-28 AFib rule validation (not beat classification).
 
 ### 2e. SDDB — Sudden Cardiac Death Holter Database
 - **Location:** `data/raw/public/sddb/` — 23 records, ~1.2GB.

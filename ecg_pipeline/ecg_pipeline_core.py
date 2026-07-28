@@ -11,11 +11,12 @@ file; only the intra-package `from .xxx import yyy` lines were dropped
 `module.function(...)` call sites were flattened to `function(...)`
 accordingly. Training/download tooling (download_datasets.py,
 download_icentia11k_full.py, train_encoder.py, train_classifiers.py,
-eval_classifier.py, splits.py) lives in the sibling file
-`ecg_pipeline_tools.py`, which imports from this one.
+eval_classifier.py, splits.py) lives in `training/ecg_pipeline_tools.py`,
+which imports from this one. (Isolated there, out of the inference path,
+per the inference-ready packaging pass -- see inference_ready.md.)
 
 The original per-stage files are preserved unchanged under
-`_original_stages/` for reference/diffing.
+`training/_original_stages/` for reference/diffing.
 
 See README.md for what changed vs. the existing baseline and why (each
 change traces back to a ranked recommendation in the internal review
@@ -287,12 +288,25 @@ def parse_vitalpatch_ecg(csv_path: Path, fs_nominal: float = 125.0) -> list[Reco
     """
     csv_path = Path(csv_path)
     raw = pd.read_csv(csv_path, header=None)
-    flat = raw.to_numpy().reshape(-1)
-    flat = flat[~pd.isna(flat)]
+    flat_raw = raw.to_numpy().reshape(-1)
+    # Some real device files contain a stray non-numeric sentinel (observed:
+    # a literal '-') for an occasional missing sample, which previously
+    # crashed the whole file with ValueError on the final .astype(float64)
+    # (70/3570 real VitalPatch segments across all 6 patients, per
+    # PROJECT_STATUS.md). Coerce to NaN instead of crashing, then drop by
+    # PAIR (timestamp, value) rather than filtering the flat stream alone --
+    # dropping a single element from the flat alternating stream before
+    # splitting into timestamps/values would silently shift every
+    # timestamp/value pairing after it by one. This also fixes that same
+    # latent misalignment risk for any ordinary pre-existing NaN cell, not
+    # just the '-' sentinel.
+    flat = pd.to_numeric(pd.Series(flat_raw), errors="coerce").to_numpy(dtype=np.float64)
     if len(flat) % 2 != 0:
         flat = flat[:-1]
-    timestamps_ms = flat[0::2].astype(np.int64)
-    values = flat[1::2].astype(np.float64)
+    pairs = flat.reshape(-1, 2)
+    pairs = pairs[~np.isnan(pairs).any(axis=1)]
+    timestamps_ms = pairs[:, 0].astype(np.int64)
+    values = pairs[:, 1].astype(np.float64)
 
     order = np.argsort(timestamps_ms, kind="stable")
     timestamps_ms, values = timestamps_ms[order], values[order]
@@ -704,17 +718,38 @@ def rejection_rate(verdicts: list[WindowVerdict]) -> float:
 
 
 def resample_linear(signal: np.ndarray, timestamps_ms: np.ndarray,
-                     target_fs: float = TARGET_FS) -> tuple[np.ndarray, np.ndarray]:
+                     target_fs: float = TARGET_FS, fs_nominal: float | None = None) -> tuple[np.ndarray, np.ndarray]:
     """Linear interpolation onto a strict uniform time grid.
 
     Linear rather than cubic, to avoid ringing near sharp QRS peaks
     (cubic splines overshoot around the steep R-wave edge).
+
+    When `fs_nominal` is given and this is a downsample (fs_nominal >
+    target_fs), the valid samples are anti-alias low-pass filtered at the
+    new Nyquist first -- otherwise high-frequency content (EMG/muscle
+    artifact) aliases down into spurious QRS-like transients that XQRS
+    later detects as extra beats. `resample_decimate` already does this for
+    integer-ratio downsampling (see its docstring); this extends the same
+    protection to the non-integer-ratio case, which previously had none.
+    Root-caused as the dominant driver of R-peak over-detection on MITDB
+    records 103/111 (n_detected ~1.8-1.9x n_true, ~1900 fully spurious
+    peaks/record with no true beat within 150ms, not double-detections of
+    real beats -- confirmed via diagnostic before this fix). VitalPatch is
+    unaffected: its native rate equals TARGET_FS, so `to_target_rate`
+    returns early and never reaches this function at all.
     """
     valid = ~np.isnan(signal)
     t = timestamps_ms[valid]
     x = signal[valid]
     if len(t) < 2:
         return np.array([]), np.array([])
+
+    if fs_nominal is not None and fs_nominal > target_fs * (1.0 + 1e-6):
+        nyq_native = fs_nominal / 2.0
+        cutoff_hz = 0.9 * (target_fs / 2.0)
+        if 0.0 < cutoff_hz < nyq_native:
+            b, a = butter(4, cutoff_hz / nyq_native, btype="low")
+            x = _safe_filtfilt(b, a, x)
 
     step_ms = 1000.0 / target_fs
     t_uniform = np.arange(t[0], t[-1], step_ms)
@@ -752,7 +787,7 @@ def to_target_rate(signal: np.ndarray, timestamps_ms: np.ndarray, fs_nominal: fl
         t_out = timestamps_ms[0] + np.arange(len(out)) * step_ms
         return out, t_out
 
-    return resample_linear(signal, timestamps_ms, target_fs)
+    return resample_linear(signal, timestamps_ms, target_fs, fs_nominal=fs_nominal)
 
 
 # ============================================================================
@@ -828,6 +863,21 @@ def emg_suppress_kalman(x: np.ndarray, process_var: float = 1e-4, meas_var: floa
     suppressing high-frequency EMG bursts between beats while a genuine
     QRS transient (large innovation) still passes through because the
     Kalman gain adapts upward on large residuals.
+
+    CORRECTION (kept unchanged deliberately): this step's fixed absolute
+    variances/clip were diagnosed as the dominant cause of R-peak
+    over-detection on small-mV-scale WFDB signal (crushes genuine QRS
+    amplitude down near the noise floor on noisy records, e.g. MITDB
+    103/111 -- XQRS then can't tell noise from a real beat). NOT changed
+    here, because this exact filtered output also feeds the frozen
+    classifier's feature extraction (segment_beats/beat_feature_vector,
+    both here and in ecg_pipeline_tools.py's training path) -- changing it
+    would silently shift the classifier's input distribution away from
+    what models/five_class_xgb.json was trained on, without retraining.
+    The detection-side fix instead lives in detect_and_segment(), which
+    runs R-peak detection on a separate, Kalman-skipped signal and only
+    uses THIS function's output (unchanged) for windowing/features, so
+    beat classification input is provably byte-identical to before.
     """
     n = len(x)
     out = np.empty(n)
@@ -854,13 +904,22 @@ def robust_zscore(x: np.ndarray) -> np.ndarray:
 
 
 def apply_filter_chain(x: np.ndarray, fs: float, already_bandpass_filtered: bool = False,
-                        cfg: FilterChainConfig = FILTER) -> np.ndarray:
-    """Run the full chain, or steps 5-6 only if the device pre-filtered."""
+                        cfg: FilterChainConfig = FILTER, skip_emg_suppress: bool = False) -> np.ndarray:
+    """Run the full chain, or steps 5-6 only if the device pre-filtered.
+
+    skip_emg_suppress=True stops after step 4 (bandpass), skipping the
+    Kalman step entirely -- used only to build a detection-purpose signal
+    for detect_and_segment (see emg_suppress_kalman's docstring). The
+    default (False) path is byte-identical to before and is what feeds
+    beat windowing/classification, so classifier input is unaffected.
+    """
     if not already_bandpass_filtered:
         x = remove_baseline_median(x, fs, cfg.median_baseline_window_ms)
         x = highpass_residual(x, fs, cfg.highpass_hz)
         x = powerline_notch(x, fs, cfg.notch_hz, cfg.notch_q)
         x = bandpass(x, fs, cfg.bandpass_low_hz, cfg.bandpass_high_hz, cfg.bandpass_order)
+    if skip_emg_suppress:
+        return x
     x = emg_suppress_kalman(x)
     return x
 
@@ -1042,7 +1101,7 @@ def segment_beats(signal: np.ndarray, fs: float, r_peaks: np.ndarray,
     return beats
 
 
-def _snap_to_local_peak(signal: np.ndarray, r_peaks: np.ndarray, search_radius: int = 15) -> np.ndarray:
+def _snap_to_local_peak(signal: np.ndarray, r_peaks: np.ndarray, search_radius: int = 8) -> np.ndarray:
     """XQRS-detected indices land close to but not always exactly on the
     true sample-wise |amplitude| local max (empirically ~3 samples off on
     resampled WFDB data -- see the training path's identical helper in
@@ -1054,6 +1113,17 @@ def _snap_to_local_peak(signal: np.ndarray, r_peaks: np.ndarray, search_radius: 
     rejected via this one reason before this snap was added). Snapping
     first makes detection agree with what that check expects, rather than
     loosening the check itself.
+
+    search_radius was widened to 15 in an earlier fix, but re-measured here
+    across 13 MITDB records (100/101/103/105/111/119/200/203/207/210/213/
+    219/223) while diagnosing R-peak over-detection: a wide radius lets the
+    snap wander past the true QRS peak onto an unrelated nearby local max
+    (a noise spike or an adjacent beat) on noisier records -- record 213
+    dropped to 44.6% beat-level retention at radius=15 vs 90.4% at
+    radius=8, while every other tested record was flat or improved at 8
+    (13-record aggregate retention: 81.0% at radius=15 vs 82.9% at
+    radius=8). 8 samples (~64ms @125Hz) still comfortably covers the
+    observed ~3-sample jitter with margin.
     """
     if len(r_peaks) == 0:
         return r_peaks
@@ -1066,9 +1136,30 @@ def _snap_to_local_peak(signal: np.ndarray, r_peaks: np.ndarray, search_radius: 
     return snapped
 
 
-def detect_and_segment(signal: np.ndarray, fs: float, cfg: BeatWindowConfig = BEATS) -> list[Beat]:
-    r_peaks = detect_r_peaks(signal, fs)
-    r_peaks = _snap_to_local_peak(signal, r_peaks)
+def detect_and_segment(signal: np.ndarray, fs: float, cfg: BeatWindowConfig = BEATS,
+                        detection_signal: np.ndarray | None = None,
+                        snap_radius: int = 8) -> list[Beat]:
+    """`signal` is what beats are windowed/featurized from (unchanged
+    behavior). `detection_signal`, if given, is used only to locate R-peaks
+    -- pass the Kalman-skipped variant here (apply_filter_chain(...,
+    skip_emg_suppress=True)) to fix R-peak over-detection on small-mV-scale
+    sources without changing a single value the classifier ever sees:
+    peaks found on `detection_signal` are still snapped to the true local
+    max and windowed/featurized from `signal`, exactly as before. Defaults
+    to `signal` itself when not given, preserving old callers' behavior.
+
+    `snap_radius` defaults to 8, the value validated via a 13-record MITDB
+    (wfdb) sweep -- see _snap_to_local_peak's docstring. That sweep was
+    wfdb-only; on real-device sources (vitalpatch/sensio) radius=8 was
+    later found to cause catastrophic beat-level over-culling on a subset
+    of recordings (up to 130/133 beats rejected via R_PEAK_NOT_LOCAL_MAX
+    on one, non-monotonically -- radius 3/5/10/15/20 were all fine, only
+    8 was not), so callers on those sources should pass the pre-existing
+    radius=15 instead. See ECGPipeline.run()'s Stage 5 comment.
+    """
+    peaks_from = detection_signal if detection_signal is not None else signal
+    r_peaks = detect_r_peaks(peaks_from, fs)
+    r_peaks = _snap_to_local_peak(signal, r_peaks, search_radius=snap_radius)
     return segment_beats(signal, fs, r_peaks, cfg)
 
 
@@ -1864,7 +1955,7 @@ class RhythmContextEngine:
         return findings
 
     def _afib_suspected(self, rr_ms: list[float | None], window: int = 20,
-                         cv_threshold: float = 0.15) -> tuple[list[RhythmFinding], int]:
+                         cv_threshold: float = 0.10) -> tuple[list[RhythmFinding], int]:
         """AFib is a RHYTHM finding computed here from RR irregularity —
         never treated as a quality defect (recommendation #6). High RR
         coefficient-of-variation over a rolling window suggests AFib,
@@ -1879,6 +1970,22 @@ class RhythmContextEngine:
         Returns (findings, n_windows_examined): the caller needs the
         total window count, not just the flagged ones, to compute AFib
         burden as a genuine percentage of windows examined.
+
+        CORRECTION (2026-07-28): this rule was flagged in RESEARCH_AUDIT.md
+        as "the single biggest unvalidated clinical claim in the pipeline"
+        — cv_threshold=0.15 had never been checked against a real
+        AFib-labeled recording. Validated for real against LTAFDB (84
+        records, 449,749 windows of 20 real annotated beats each, ground
+        truth from '+' rhythm-change aux_notes): at 0.15, sensitivity=0.808
+        / specificity=0.800 / F1=0.829. A full threshold sweep found 0.10
+        Youden's-J-optimal on this data: sensitivity=0.971 / specificity=
+        0.716 / F1=0.893 — a meaningfully better catch rate for a
+        "suspected" screening flag (misses ~3% of true AFib windows vs
+        ~19% at 0.15), at the cost of more false positives for a clinician
+        to review. Changed 0.15 -> 0.10 on that evidence. See
+        ABLATION_REPORT.md's "AFib rule validation" section for the full
+        sweep table and methodology. `window=20` was left unswept — only
+        the threshold was validated here.
         """
         findings = []
         n_windows_examined = 0
@@ -2405,8 +2512,49 @@ class ECGPipeline:
                                        already_bandpass_filtered=recording.already_bandpass_filtered)
         audit.append("STAGE4_FILTER", {"already_bandpass_filtered": recording.already_bandpass_filtered})
 
-        # Stage 5: R-peak detection + beat segmentation
-        beats = detect_and_segment(filtered, TARGET_FS, BEATS)
+        # Stage 5: R-peak detection + beat segmentation. Detection runs on a
+        # separate signal from `filtered`; windowing/features always come
+        # from `filtered` above, unchanged, so the classifier's input is
+        # provably unaffected by this branch either way.
+        #
+        # For source="wfdb" (true calibrated-mV signal): skip Kalman for
+        # detection. Root-caused via direct pre/post-Kalman XQRS A/B test:
+        # emg_suppress_kalman's fixed-absolute-unit variances collapse
+        # genuine QRS amplitude toward the noise floor on this signal's
+        # small (~0.1-0.5 mV) scale, destroying the SNR XQRS needs and
+        # causing severe over-detection (e.g. MITDB 103/111 were ~2x
+        # true beat count with Kalman included).
+        #
+        # For source="vitalpatch"/"sensio" (arbitrary firmware-scaled raw
+        # ADC counts, no published mV-per-count constant -- see
+        # SQIThresholds.baseline_wander_ratio_max): the opposite holds.
+        # These sources have real amplitude ~1000x the wfdb mV scale, and
+        # skipping Kalman here exposes large genuine motion/EMG noise
+        # excursions that XQRS then over-detects as QRS complexes (tested
+        # on several VitalPatch recordings: skipping Kalman produced
+        # implausible ~140bpm detection rates with >100 RR intervals
+        # <0.3s, i.e. >200bpm adjacent-beat gaps that no real heart
+        # produces; keeping Kalman for these sources reproduces the
+        # original physiologically-plausible detection rate with <10 such
+        # intervals). Kalman's smoothing is genuinely needed noise
+        # suppression here, not the SNR-destroying effect seen on wfdb --
+        # confirmed a plain robust-amplitude rescale of the Kalman-skipped
+        # signal does NOT fix it (XQRS's threshold adapts internally; the
+        # problem is real noise energy, not an absolute-unit miscalibration),
+        # so this is a genuine per-source difference, not a threshold hack.
+        if recording.source == "wfdb":
+            detection_signal = apply_filter_chain(resampled_filled, TARGET_FS,
+                                                   already_bandpass_filtered=recording.already_bandpass_filtered,
+                                                   skip_emg_suppress=True)
+        else:
+            detection_signal = filtered
+        # snap_radius: 8 is wfdb-only validated (see detect_and_segment's
+        # docstring); real-device sources keep the pre-existing radius=15,
+        # which a full VitalPatch batch re-run confirmed does not have the
+        # over-culling failure mode radius=8 has on this data.
+        snap_radius = 8 if recording.source == "wfdb" else 15
+        beats = detect_and_segment(filtered, TARGET_FS, BEATS, detection_signal=detection_signal,
+                                    snap_radius=snap_radius)
         n_rejected = sum(1 for b in beats if b.quality_rejected)
         audit.append("STAGE5_BEATS", {"n_beats_detected": len(beats), "n_beats_rejected": n_rejected,
                                        "n_rr_flagged": sum(1 for b in beats if b.rr_flagged)})

@@ -76,11 +76,17 @@ def _legacy_mock_vitals_case() -> dict:
     return random.choice(list_test_cases())
 
 
-# MedGemma-Agent/vitals/schemas.py:66-70 (VitalsSnapshotInput) -- verified by direct
-# read: heart_rate, spo2, systolic_bp, diastolic_bp are ALL required (Field(...), no
-# default, each with its own physiological-range validator). Only ecg_risk and
-# snapshot_timestamp are optional/defaulted. None of the four may be omitted or null.
-REQUIRED_AGENT_VITALS_FIELDS = ["heart_rate", "spo2", "systolic_bp", "diastolic_bp"]
+# ORIGINAL (before MedGemma-Agent's partial-vitals schema change): heart_rate,
+# spo2, systolic_bp, diastolic_bp were ALL required (Field(...), no default) in
+# MedGemma-Agent/vitals/schemas.py:66-70 -- none could be omitted or null.
+# REQUIRED_AGENT_VITALS_FIELDS = ["heart_rate", "spo2", "systolic_bp", "diastolic_bp"]
+#
+# MedGemma-Agent/vitals/schemas.py now makes spo2/systolic_bp/diastolic_bp
+# Optional[float] = None; heart_rate is still the only required field (it's
+# VitalPatch's one guaranteed vital, and NEWS2/qSOFA can't score anything
+# without at least one real value). This list must be kept in sync with that
+# schema by hand -- it is not introspected at runtime.
+REQUIRED_AGENT_VITALS_FIELDS = ["heart_rate"]
 _AGENT_FIELD_TO_LOCAL_KEY = {
     "heart_rate": "hr", "spo2": "spo2", "systolic_bp": "sbp", "diastolic_bp": "dbp",
 }
@@ -382,12 +388,62 @@ def run_ecg_segment(recording, classifier: FiveClassBeatClassifier):
     return to_agent_ecg_risk_summary(result.risk_report), result
 
 
+# ORIGINAL (pre-connection-failure-hardening): raised whatever requests threw
+# (ConnectionError/Timeout/HTTPError/etc.) straight up to the caller. This was
+# never actually exercised until MedGemma-Agent's schema stopped requiring
+# SpO2/BP -- before that, push_main's own completeness check always skipped
+# before reaching this call. Now that the call is reachable, an unhandled
+# exception here would crash the whole batch on the first unreachable/erroring
+# segment, which is worse than reporting it and moving on.
+# def submit_to_agent(patient_id: str, vitals_values: dict, ecg_risk: dict,
+#                      agent_url: str, api_key: str, timeout: float = 150.0) -> dict:
+#     payload = {"patient_id": patient_id, **vitals_values, "ecg_risk": ecg_risk}
+#     resp = requests.post(agent_url, json=payload, headers={"X-API-Key": api_key}, timeout=timeout)
+#     resp.raise_for_status()
+#     return resp.json()
 def submit_to_agent(patient_id: str, vitals_values: dict, ecg_risk: dict,
                      agent_url: str, api_key: str, timeout: float = 150.0) -> dict:
+    """Returns {"push_status", "error", "agent_response"} -- never raises.
+    push_status is one of SUCCESS / AGENT_UNREACHABLE / AGENT_TIMEOUT /
+    AGENT_HTTP_ERROR / AGENT_ERROR (mirrors the status-string pattern this
+    codebase already uses elsewhere, e.g. report.py's medgemma_status:
+    SKIPPED_CRITICAL/UNAVAILABLE_FALLBACK/REJECTED_FALLBACK/ACCEPTED).
+
+    timeout stays at the existing 150s default, not a shorter one -- the
+    Agent's /vitals/snapshot handler runs a synchronous LLM analysis step
+    (monitoring_agent.invoke -> llm_analyzer -> Ollama) inside the request,
+    which can legitimately take much longer than a plain API call.
+    """
     payload = {"patient_id": patient_id, **vitals_values, "ecg_risk": ecg_risk}
-    resp = requests.post(agent_url, json=payload, headers={"X-API-Key": api_key}, timeout=timeout)
-    resp.raise_for_status()
-    return resp.json()
+    try:
+        resp = requests.post(agent_url, json=payload, headers={"X-API-Key": api_key}, timeout=timeout)
+        resp.raise_for_status()
+        return {"push_status": "SUCCESS", "error": None, "agent_response": resp.json()}
+    except requests.exceptions.ConnectionError:
+        return {
+            "push_status": "AGENT_UNREACHABLE",
+            "error": f"Could not connect to MedGemma Agent at {agent_url}. Is the server "
+                     f"running? Start with: cd MedGemma-Agent && ./start.sh",
+            "agent_response": None,
+        }
+    except requests.exceptions.Timeout:
+        return {
+            "push_status": "AGENT_TIMEOUT",
+            "error": f"MedGemma Agent at {agent_url} did not respond within {timeout}s.",
+            "agent_response": None,
+        }
+    except requests.exceptions.HTTPError as e:
+        return {
+            "push_status": "AGENT_HTTP_ERROR",
+            "error": f"Agent returned HTTP {e.response.status_code}: {e.response.text[:200]}",
+            "agent_response": None,
+        }
+    except requests.exceptions.RequestException as e:
+        return {
+            "push_status": "AGENT_ERROR",
+            "error": f"Unexpected error contacting Agent: {e}",
+            "agent_response": None,
+        }
 
 
 # ============================================================================
@@ -1305,6 +1361,8 @@ def push_main(argv: list[str] | None = None) -> None:
                     "combined_risk": combined_risk,
                     "override_activated": override_activated,
                     "agent_response": None,
+                    "agent_push_status": "SKIPPED_MISSING_REQUIRED_FIELDS",
+                    "agent_push_error": f"missing required Agent fields: {missing_required}",
                     "push_skipped_reason": f"missing required Agent fields: {missing_required}",
                 }, indent=2, default=str))
                 n_done += 1
@@ -1316,8 +1374,25 @@ def push_main(argv: list[str] | None = None) -> None:
                 "systolic_bp": vitals["sbp"]["value"],
                 "diastolic_bp": vitals["dbp"]["value"],
             }
-            response = submit_to_agent(recording.patient_id, vitals_values, ecg_risk,
-                                        args.agent_url, args.api_key)
+            # submit_to_agent() now never raises -- it returns a structured
+            # {"push_status", "error", "agent_response"} dict instead (see its
+            # own docstring). This is the first point in the pipeline where the
+            # live HTTP call is actually reachable (every prior run hit the SKIP
+            # branch above first, so an unreachable/erroring Agent server was
+            # never exercised before). The Agent push is additive: its failure
+            # must never suppress the local multimodal result already computed
+            # above (ecg_only_risk/combined_risk/override_activated), so it's
+            # always written to the output JSON regardless of push_status.
+            agent_result = submit_to_agent(recording.patient_id, vitals_values, ecg_risk,
+                                            args.agent_url, args.api_key)
+            push_status = agent_result["push_status"]
+            if push_status != "SUCCESS":
+                print(f"\n=== AGENT PUSH STATUS: {push_status} ===")
+                print(f"  {agent_result.get('error', 'unknown error')}")
+                print(f"  Combined risk still computed locally from partial NEWS2.")
+                print(f"  NEWS2 loopback from Agent: not available this run.")
+            else:
+                print(f"\n=== AGENT PUSH: SUCCESS ===")
             print(json.dumps({
                 "segment_id": recording.segment_id,
                 "patient_id": recording.patient_id,
@@ -1334,7 +1409,9 @@ def push_main(argv: list[str] | None = None) -> None:
                 "ecg_only_risk": ecg_only_risk,
                 "combined_risk": combined_risk,
                 "override_activated": override_activated,
-                "agent_response": response,
+                "agent_response": agent_result["agent_response"],
+                "agent_push_status": push_status,
+                "agent_push_error": agent_result.get("error"),
             }, indent=2, default=str))
             n_done += 1
 

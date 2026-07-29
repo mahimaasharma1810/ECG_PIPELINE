@@ -337,6 +337,37 @@ def compute_partial_news2(vitals: dict) -> dict:
     }
 
 
+def compute_qsofa_proxy(vitals: dict) -> dict:
+    """Degenerate proxy for qSOFA (Sepsis-3, Singer et al. JAMA 2016), NOT a real
+    qSOFA score. Standard qSOFA has 3 independent criteria (SBP<=100, HR>90,
+    a respiratory-dysfunction proxy) and is "high risk" at score>=2 -- see
+    MedGemma-Agent/guardrails/clinical_rules.py:calculate_qsofa for the real
+    3-criteria version this project already has for comparison. VitalPatch can
+    only ever evaluate 1 of the 3 (HR).
+
+    SBP is deliberately NOT scored 0 when unavailable -- scoring it 0 would
+    silently assert "not hypotensive," which cannot be verified from this
+    hardware. It is left out of the total entirely and reported as
+    unevaluated, not assumed safe.
+    """
+    hr = vitals["hr"]["value"]
+    hr_flag = bool(hr is not None and hr > 90)
+    score = int(hr_flag)
+    return {
+        "qsofa_proxy_score": score,
+        "hr_flag": hr_flag,
+        "hr_value": hr,
+        "sbp_flag": None,
+        "sbp_note": ("SBP criterion cannot be evaluated -- VitalPatch has no BP sensor. "
+                     "Not scored as 0 (would assert 'not hypotensive', unverifiable) -- "
+                     "left out of the total and reported as unevaluated."),
+        "note": ("1-of-3-criteria proxy, not a real qSOFA score. Standard qSOFA's "
+                 "high-risk threshold is 2; this proxy's maximum possible value is 1, "
+                 "so it can never independently trigger the ECG cascade's qSOFA "
+                 "override (RISK.qsofa_high_threshold=2) from VitalPatch data alone."),
+    }
+
+
 def load_classifier(classifier_path: Path) -> FiveClassBeatClassifier:
     classifier = FiveClassBeatClassifier()
     classifier.load(classifier_path)
@@ -1193,6 +1224,35 @@ def push_main(argv: list[str] | None = None) -> None:
                   f"(conservative lower bound)")
             print("=========================\n")
 
+            # Feed the LOCALLY computed partial NEWS2 / qSOFA proxy into the ECG
+            # pipeline's own risk cascade (score_recording()'s news2_score/
+            # qsofa_score params, ecg_pipeline_core.py:2041-2042, wired through
+            # ECGPipeline.run() at line 2481) -- these fields have existed since
+            # the original audit but were permanently null because nothing ever
+            # called them with a real value. This is that missing caller. Not a
+            # round trip through MedGemma-Agent (that push still always skips,
+            # see below) -- purely local, computed straight from VitalPatch data.
+            qsofa_proxy = compute_qsofa_proxy(vitals)
+            ecg_only_risk = result.risk_report.alert_level
+            combined_result = ECGPipeline(classifier=classifier).run(
+                recording,
+                news2_score=partial_news2["partial_news2_score"],
+                qsofa_score=qsofa_proxy["qsofa_proxy_score"],
+            )
+            combined_risk = combined_result.risk_report.alert_level
+            override_activated = combined_risk != ecg_only_risk
+
+            print("=== COMBINED RISK ===")
+            print(f"  ECG-only:      {ecg_only_risk}")
+            print(f"  Partial NEWS2: {partial_news2['partial_news2_score']} "
+                  f"({partial_news2['coverage']} -- conservative lower bound; "
+                  f"cascade's NEWS2-critical threshold is {RISK.news2_critical_threshold})")
+            print(f"  qSOFA proxy:   {qsofa_proxy['qsofa_proxy_score']} "
+                  f"(HR criterion only -- {qsofa_proxy['sbp_note']})")
+            print(f"  Combined:      {combined_risk}")
+            print(f"  Override:      {override_activated}")
+            print("=========================\n")
+
             # MedGemma-Agent's /vitals/snapshot schema requires all four fields as
             # non-null floats (REQUIRED_AGENT_VITALS_FIELDS, sourced from
             # MedGemma-Agent/vitals/schemas.py:67-70) -- check completeness rather
@@ -1235,6 +1295,15 @@ def push_main(argv: list[str] | None = None) -> None:
                     "ecg_risk": ecg_risk,
                     "vitals_provenance": vitals,
                     "partial_news2": partial_news2,
+                    "news2_source": "vitalpatch_partial_local",
+                    "news2_score_used": partial_news2["partial_news2_score"],
+                    "news2_partial": True,
+                    "news2_missing_components": partial_news2["missing_components"],
+                    "qsofa_proxy": qsofa_proxy["qsofa_proxy_score"],
+                    "qsofa_proxy_note": qsofa_proxy["note"] + " " + qsofa_proxy["sbp_note"],
+                    "ecg_only_risk": ecg_only_risk,
+                    "combined_risk": combined_risk,
+                    "override_activated": override_activated,
                     "agent_response": None,
                     "push_skipped_reason": f"missing required Agent fields: {missing_required}",
                 }, indent=2, default=str))
@@ -1256,6 +1325,15 @@ def push_main(argv: list[str] | None = None) -> None:
                 "ecg_risk": ecg_risk,
                 "vitals_provenance": vitals,
                 "partial_news2": partial_news2,
+                "news2_source": "vitalpatch_partial_local",
+                "news2_score_used": partial_news2["partial_news2_score"],
+                "news2_partial": True,
+                "news2_missing_components": partial_news2["missing_components"],
+                "qsofa_proxy": qsofa_proxy["qsofa_proxy_score"],
+                "qsofa_proxy_note": qsofa_proxy["note"] + " " + qsofa_proxy["sbp_note"],
+                "ecg_only_risk": ecg_only_risk,
+                "combined_risk": combined_risk,
+                "override_activated": override_activated,
                 "agent_response": response,
             }, indent=2, default=str))
             n_done += 1

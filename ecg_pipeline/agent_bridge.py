@@ -1200,7 +1200,16 @@ def report_main(argv: list[str] | None = None) -> None:
 
 def push_main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--vitalpatch-root", type=Path, default=DATA_RAW / "vitalpatch")
+    parser.add_argument(
+        "--vitalpatch-root", type=Path, default=DATA_RAW / "vitalpatch",
+        help="Root directory containing Patch_<ID>/*_ecg.csv files -- must be the "
+             "PARENT of one or more Patch_* dirs, not a Patch_* dir itself (this CLI "
+             "has no per-file --input flag; files are discovered via glob and taken "
+             "in sorted order up to --limit). For a quick test with real HR+RR+Temp "
+             "all present, use Patch_184B2F/1778329087549_VC2B008BF_184B2F_ecg.csv "
+             "(confirmed this session: HR=93.7, RR=17.5, Temp=36.0) -- point this flag "
+             "at a directory containing (e.g. a symlink to) only that one Patch_184B2F "
+             "folder and pass --limit 3 to land on it deterministically.")
     parser.add_argument("--vitals-root", type=Path,
                          default=Path("/home2/mahimakopalley/projects/data/vitals_downloads"),
                          help="Root directory of VitalPatch vitals CSV files")
@@ -1368,11 +1377,24 @@ def push_main(argv: list[str] | None = None) -> None:
                 n_done += 1
                 continue
 
+            # ORIGINAL (before RR/temp were wired into the Agent payload): only
+            # sent heart_rate/spo2/systolic_bp/diastolic_bp -- respiratory_rate
+            # and temperature were computed by load_real_vitals() but never
+            # actually included in the HTTP payload, so even a fully successful
+            # push only ever gave the Agent 1 of VitalPatch's 3 real components.
+            # vitals_values = {
+            #     "heart_rate": vitals["hr"]["value"],
+            #     "spo2": vitals["spo2"]["value"],
+            #     "systolic_bp": vitals["sbp"]["value"],
+            #     "diastolic_bp": vitals["dbp"]["value"],
+            # }
             vitals_values = {
-                "heart_rate": vitals["hr"]["value"],
-                "spo2": vitals["spo2"]["value"],
-                "systolic_bp": vitals["sbp"]["value"],
-                "diastolic_bp": vitals["dbp"]["value"],
+                "heart_rate":       vitals["hr"]["value"],
+                "spo2":             vitals["spo2"]["value"],         # None -- no sensor
+                "systolic_bp":      vitals["sbp"]["value"],          # None -- no sensor
+                "diastolic_bp":     vitals["dbp"]["value"],          # None -- no sensor
+                "respiratory_rate": vitals["respiratory_rate"]["value"],  # real if available
+                "temperature":      vitals["temperature"]["value"],       # real if available
             }
             # submit_to_agent() now never raises -- it returns a structured
             # {"push_status", "error", "agent_response"} dict instead (see its
@@ -1386,6 +1408,20 @@ def push_main(argv: list[str] | None = None) -> None:
             agent_result = submit_to_agent(recording.patient_id, vitals_values, ecg_risk,
                                             args.agent_url, args.api_key)
             push_status = agent_result["push_status"]
+
+            # Extract the Agent's own live NEWS2/qSOFA scores. Verified by direct
+            # read this session (MedGemma-Agent/vitals/schemas.py): AlertResponse.news2
+            # is a NEWS2Breakdown with .total_score/.coverage; AlertResponse.qsofa is a
+            # QSOFABreakdown with .score. agent_response here is the JSON-decoded dict
+            # from resp.json() (submit_to_agent), so these are dict lookups, not
+            # attribute access on the Pydantic model itself.
+            agent_response = agent_result.get("agent_response") or {}
+            news2_block = agent_response.get("news2") or {}
+            qsofa_block = agent_response.get("qsofa") or {}
+            agent_news2_score = news2_block.get("total_score")
+            agent_news2_coverage = news2_block.get("coverage")
+            agent_qsofa_score = qsofa_block.get("score")
+
             if push_status != "SUCCESS":
                 print(f"\n=== AGENT PUSH STATUS: {push_status} ===")
                 print(f"  {agent_result.get('error', 'unknown error')}")
@@ -1393,6 +1429,38 @@ def push_main(argv: list[str] | None = None) -> None:
                 print(f"  NEWS2 loopback from Agent: not available this run.")
             else:
                 print(f"\n=== AGENT PUSH: SUCCESS ===")
+
+            # If the Agent returned a real NEWS2 score, it supersedes the local
+            # partial_news2 approximation already computed above -- re-run the ECG
+            # cascade with the Agent's live values instead of trusting the local
+            # one. combined_risk/override_activated are reassigned here only in
+            # that case; local_partial_news2 below always preserves the original
+            # local-only number for comparison, regardless of which one won.
+            news2_source = "local_partial"
+            if agent_news2_score is not None:
+                print(f"\n=== AGENT NEWS2 RECEIVED ===")
+                print(f"  Score:    {agent_news2_score}")
+                print(f"  Coverage: {agent_news2_coverage}")
+                print(f"  qSOFA:    {agent_qsofa_score}")
+
+                agent_scored_result = ECGPipeline(classifier=classifier).run(
+                    recording, news2_score=agent_news2_score, qsofa_score=agent_qsofa_score,
+                )
+                combined_risk = agent_scored_result.risk_report.alert_level
+                override_activated = combined_risk != ecg_only_risk
+                news2_source = "agent_live"
+
+                print(f"\n=== COMBINED RISK (Agent-driven) ===")
+                print(f"  ECG only:   {ecg_only_risk}")
+                print(f"  Combined:   {combined_risk}")
+                print(f"  Override:   {override_activated}")
+            else:
+                reason = "push did not succeed" if push_status != "SUCCESS" else "Agent response had no NEWS2 block"
+                print(f"\n=== COMBINED RISK (local partial fallback) ===")
+                print(f"  ECG only:  {ecg_only_risk}")
+                print(f"  Combined:  {combined_risk}")
+                print(f"  Note: {reason} -- using locally-computed partial NEWS2 instead")
+
             print(json.dumps({
                 "segment_id": recording.segment_id,
                 "patient_id": recording.patient_id,
@@ -1400,9 +1468,12 @@ def push_main(argv: list[str] | None = None) -> None:
                 "ecg_risk": ecg_risk,
                 "vitals_provenance": vitals,
                 "partial_news2": partial_news2,
-                "news2_source": "vitalpatch_partial_local",
-                "news2_score_used": partial_news2["partial_news2_score"],
-                "news2_partial": True,
+                "agent_push_status": push_status,
+                "agent_news2_score": agent_news2_score,
+                "agent_news2_coverage": agent_news2_coverage,
+                "agent_qsofa_score": agent_qsofa_score,
+                "local_partial_news2": partial_news2["partial_news2_score"],
+                "news2_source": news2_source,
                 "news2_missing_components": partial_news2["missing_components"],
                 "qsofa_proxy": qsofa_proxy["qsofa_proxy_score"],
                 "qsofa_proxy_note": qsofa_proxy["note"] + " " + qsofa_proxy["sbp_note"],
@@ -1410,7 +1481,6 @@ def push_main(argv: list[str] | None = None) -> None:
                 "combined_risk": combined_risk,
                 "override_activated": override_activated,
                 "agent_response": agent_result["agent_response"],
-                "agent_push_status": push_status,
                 "agent_push_error": agent_result.get("error"),
             }, indent=2, default=str))
             n_done += 1

@@ -90,49 +90,85 @@ _AGENT_FIELD_TO_LOCAL_KEY = {
 DEFAULT_VITALS_MAX_OFFSET_MS = 30_000
 
 
+def _extract_numeric_column(vitals_path: Path, col_idx: int, lo: float, hi: float) -> list[float]:
+    values: list[float] = []
+    with open(vitals_path, newline="") as fh:
+        for row in csv.reader(fh):
+            if len(row) <= col_idx or not row[col_idx]:
+                continue
+            try:
+                v = float(row[col_idx])
+            except ValueError:
+                continue
+            if lo <= v <= hi:
+                values.append(v)
+    return values
+
+
+def _numeric_stat_dict(values: list[float], source: str, note: str | None = None) -> dict:
+    if not values:
+        return {"value": None, "source": source, "real": False,
+                "note": "no valid readings in vitals file"}
+    d = {
+        "value": round(sum(values) / len(values), 1),
+        "min": min(values),
+        "max": max(values),
+        "n_readings": len(values),
+        "source": source,
+        "real": True,
+    }
+    if note:
+        d["note"] = note
+    return d
+
+
 def load_real_vitals(ecg_path: str, vitals_root: str,
                       max_offset_ms: int = DEFAULT_VITALS_MAX_OFFSET_MS) -> dict:
     """Loads real VitalPatch vitals for the ECG segment at ecg_path, from the
     companion vitals CSV under vitals_root/<same Patch_<ID> folder>/.
 
-    TWO CORRECTIONS made here vs. the original task assumptions, both verified
-    directly against the real files on disk before writing this function (not
+    CORRECTIONS made here vs. task assumptions, each verified directly against
+    the real files on disk before writing/extending this function (not
     assumed):
 
-    1. FILE PAIRING IS NOT AN EXACT FILENAME MATCH. The claim that ECG and
-       vitals files share an identical timestamp prefix does not hold: checked
-       all 424 ECG files for Patch_184B2F against all 425 vitals files in the
-       same folder -- an exact "_ecg.csv"->"_vitals.csv" substring swap matched
-       0/424. The two collector streams log independent timestamps for what is
-       otherwise the same capture session. Measured nearest-timestamp offset
-       distribution across all 424 files: p50=4.5s, p90=11.4s, 95.3% of files
-       have a nearest vitals file within 15s, 98.3% within 30s, and the
-       remaining ~1.7% plateau even at 300s (genuine gaps -- no nearby vitals
-       recording exists at all, not a tolerance problem). 30s was chosen as
-       the default cutoff: tight enough that a paired HR reading is still
-       describing approximately the same clinical moment as the ECG segment,
-       loose enough to cover 98.3% of real pairs. The actual offset used is
-       always returned in "vitals_time_offset_ms" so a caller/reviewer can
-       judge staleness of any specific pairing rather than trusting a single
-       hardcoded cutoff blindly.
+    1. FILE PAIRING IS NOT AN EXACT FILENAME MATCH. Checked all 424 ECG files
+       for Patch_184B2F against all 425 vitals files in the same folder -- an
+       exact "_ecg.csv"->"_vitals.csv" substring swap matched 0/424. The two
+       collector streams log independent timestamps for the same capture
+       session. Nearest-timestamp offsets: p50=4.5s, p90=11.4s, 95.3% within
+       15s, 98.3% within 30s, then a hard plateau (the remaining ~1.7% are
+       genuine gaps, not a tolerance problem). 30s is the default cutoff. The
+       actual offset used is always returned in "vitals_time_offset_ms" so a
+       caller can judge staleness of any specific pairing directly.
 
-    2. COLUMN 7 IS NOT SPO2. The task assumed col 7 = SpO2. Inspecting the
-       real file (11 columns, no header) shows col 1 = HR (bpm) is a genuine,
-       varying sensor signal (24 distinct values across 789 readings in one
-       file, physiologically plausible range) -- that assumption holds. But
-       col 7 is NOT SpO2: within any single file it is one constant value
-       repeated ~300 times (zero variance -- no real vital does that), and
-       that constant varies wildly and non-physiologically ACROSS files for
-       the same patient (checked 8 files: 2, 3, 7, 16, 17, 20, 32, 47, 75 --
-       most are outside any clinical SpO2 range). This is a per-file
-       device/session metadata value, not a measurement. This independently
-       confirms parse_vitalpatch_vitals()'s own docstring in
-       ecg_pipeline_core.py: "VitalPatch has no SpO2/BP sensor on this
-       hardware, so those columns are sentinel values if present." SpO2 is
-       therefore always reported as unavailable here (mirrors how BP is
-       already handled), never fabricated from col 7.
+    2. COLUMN 7 IS NOT SPO2. Col 1 (HR, bpm) is a genuine, varying sensor
+       signal. Col 7 is NOT SpO2: within any single file it is one constant
+       value repeated ~300 times (zero variance), and that constant varies
+       wildly and non-physiologically ACROSS files for the same patient
+       (checked 8 files: 2, 3, 7, 16, 17, 20, 32, 47, 75). This is a per-file
+       device/session metadata value, not a measurement -- confirmed by
+       parse_vitalpatch_vitals()'s own docstring in ecg_pipeline_core.py:
+       "VitalPatch has no SpO2/BP sensor on this hardware, so those columns
+       are sentinel values if present." SpO2 is always reported unavailable,
+       never fabricated from col 7.
 
-    Only HR is ever marked "real": True by this function.
+    3. COLUMN 3 (temperature) NEEDS A MULTI-FILE CHECK, NOT A SINGLE-FILE SPOT
+       CHECK. The specific file used to verify correction #2 (offset=78ms
+       match) happens to have ZERO col-3 readings for that time window --
+       checking only that one file would have wrongly concluded "temperature
+       is never present." Checked 20 files instead: 18/20 have real col-3
+       data, physiologically plausible (35.83-37.36C) and drifting smoothly
+       across consecutive time windows (a real physiological signal, not
+       noise) -- confirms col 3 = temperature. This is why file-format claims
+       here are verified across multiple files, not one.
+
+    Additional columns confirmed and now extracted: col 2 = respiratory rate
+    (breaths/min -- NOT the cardiac RR-interval; that is a separate field,
+    col 6, not extracted by this function), col 5 = posture (categorical
+    string, e.g. "Standing"/"Walking"/"LeaningBack"/"Unknown").
+
+    Only hr, respiratory_rate, temperature, and posture can ever be marked
+    "real": True by this function -- spo2/sbp/dbp never can, on this hardware.
     """
     ecg_path = Path(ecg_path)
     vitals_root = Path(vitals_root)
@@ -156,61 +192,148 @@ def load_real_vitals(ecg_path: str, vitals_root: str,
 
     vitals_path = best_path if (best_path is not None and best_offset <= max_offset_ms) else None
 
+    not_available_bp_note = "VitalPatch has no BP sensor"
+    not_available_spo2 = {"value": None, "source": "not_available", "real": False,
+                           "note": "VitalPatch has no SpO2 sensor"}
+    not_available_sbp = {"value": None, "source": "not_available", "real": False,
+                          "note": not_available_bp_note}
+    not_available_dbp = {"value": None, "source": "not_available", "real": False,
+                          "note": not_available_bp_note}
+
     if vitals_path is None:
         attempted = (str(best_path) if best_path is not None
                      else str(patient_dir / ecg_path.name.replace("_ecg.csv", "_vitals.csv")))
+        not_found = {"value": None, "source": "not_found", "real": False}
         return {
-            "hr": {"value": None, "source": "not_found", "real": False},
-            "spo2": {"value": None, "source": "not_found", "real": False},
-            "sbp": {"value": None, "source": "not_available", "real": False},
-            "dbp": {"value": None, "source": "not_available", "real": False},
+            "hr": dict(not_found),
+            "respiratory_rate": dict(not_found),
+            "temperature": dict(not_found),
+            "posture": {"values": [], "most_common": None, "source": "not_found", "real": False},
+            "spo2": not_available_spo2,
+            "sbp": not_available_sbp,
+            "dbp": not_available_dbp,
             "vitals_file": attempted,
             "vitals_file_found": False,
             "vitals_time_offset_ms": best_offset,
         }
 
-    # col 1 = HR (bpm) -- confirmed real, see docstring correction #2 above.
-    hr_values: list[float] = []
+    hr = _numeric_stat_dict(_extract_numeric_column(vitals_path, 1, 20, 300),
+                             "vitalpatch_col1")
+    respiratory_rate = _numeric_stat_dict(
+        _extract_numeric_column(vitals_path, 2, 4, 60), "vitalpatch_col2",
+        note="VitalPatch-derived RR -- not spirometry")
+    temperature = _numeric_stat_dict(
+        _extract_numeric_column(vitals_path, 3, 35.0, 42.0), "vitalpatch_col3",
+        note="Skin temperature -- may underestimate core temp by ~0.5C")
+
+    posture_values: list[str] = []
     with open(vitals_path, newline="") as fh:
         for row in csv.reader(fh):
-            if len(row) <= 1 or not row[1]:
+            if len(row) <= 5 or not row[5]:
                 continue
-            try:
-                v = float(row[1])
-            except ValueError:
-                continue
-            if 20 <= v <= 300:
-                hr_values.append(v)
-
-    if hr_values:
-        hr = {
-            "value": round(sum(hr_values) / len(hr_values), 1),
-            "min": min(hr_values),
-            "max": max(hr_values),
-            "n_readings": len(hr_values),
-            "source": "vitalpatch_vitals_csv",
+            posture_values.append(row[5])
+    if posture_values:
+        counts: dict[str, int] = {}
+        for p in posture_values:
+            counts[p] = counts.get(p, 0) + 1
+        posture = {
+            "values": sorted(set(posture_values)),
+            "most_common": max(counts, key=counts.get),
+            "source": "vitalpatch_col5",
             "real": True,
         }
     else:
-        hr = {"value": None, "source": "vitalpatch_vitals_csv", "real": False,
-              "note": "no valid HR readings in vitals file"}
-
-    # SpO2 is never extracted from col 7 -- see docstring correction #2 above.
-    spo2 = {"value": None, "source": "not_available", "real": False,
-            "note": "VitalPatch has no SpO2 sensor -- col 7 of this file format is a "
-                    "per-file constant metadata value, not a physiological reading "
-                    "(verified across 9 patient files); see parse_vitalpatch_vitals() "
-                    "in ecg_pipeline_core.py"}
-    sbp = {"value": None, "source": "not_available", "real": False,
-           "note": "VitalPatch does not measure BP"}
-    dbp = {"value": None, "source": "not_available", "real": False,
-           "note": "VitalPatch does not measure BP"}
+        posture = {"values": [], "most_common": None, "source": "vitalpatch_col5",
+                    "real": False, "note": "no posture readings in vitals file"}
 
     return {
-        "hr": hr, "spo2": spo2, "sbp": sbp, "dbp": dbp,
+        "hr": hr,
+        "respiratory_rate": respiratory_rate,
+        "temperature": temperature,
+        "posture": posture,
+        "spo2": not_available_spo2,
+        "sbp": not_available_sbp,
+        "dbp": not_available_dbp,
         "vitals_file": str(vitals_path),
         "vitals_file_found": True,
         "vitals_time_offset_ms": best_offset,
+    }
+
+
+# ── Partial NEWS2 (Royal College of Physicians, National Early Warning Score
+# (NEWS) 2, 2017) -- only the 3 of 6 standard components VitalPatch can supply
+# (HR, respiratory rate, temperature) are scored from real data. SpO2,
+# systolic BP, and consciousness (AVPU) are not measurable on this hardware
+# and are always scored 0 -- the conservative direction, since it can only
+# ever UNDER-count risk, never inflate it -- and always listed explicitly in
+# missing_components, never silently dropped. This is a LOWER BOUND, not a
+# clinically complete NEWS2: a missing component could itself be abnormal and
+# this score has no way to detect that.
+# ────────────────────────────────────────────────────────────────────────────
+
+def _news2_hr_score(hr: float) -> int:
+    if hr <= 40: return 3
+    if hr <= 50: return 1
+    if hr <= 90: return 0
+    if hr <= 110: return 1
+    if hr <= 130: return 2
+    return 3
+
+
+def _news2_rr_score(rr: float) -> int:
+    if rr <= 8: return 3
+    if rr <= 11: return 1
+    if rr <= 20: return 0
+    if rr <= 24: return 2
+    return 3
+
+
+def _news2_temp_score(temp: float) -> int:
+    if temp <= 35.0: return 3
+    if temp <= 36.0: return 1
+    if temp <= 38.0: return 0
+    if temp <= 39.0: return 1
+    return 2
+
+
+def compute_partial_news2(vitals: dict) -> dict:
+    hr_v = vitals["hr"]["value"]
+    rr_v = vitals["respiratory_rate"]["value"]
+    temp_v = vitals["temperature"]["value"]
+
+    hr_score = _news2_hr_score(hr_v) if hr_v is not None else 0
+    rr_score = _news2_rr_score(rr_v) if rr_v is not None else 0
+    temp_score = _news2_temp_score(temp_v) if temp_v is not None else 0
+    total = hr_score + rr_score + temp_score  # spo2/sbp/consciousness always contribute 0
+
+    missing = ["spo2", "sbp", "consciousness"]
+    for key, val in (("hr", hr_v), ("respiratory_rate", rr_v), ("temperature", temp_v)):
+        if val is None:
+            missing.append(key)
+    scored_count = sum(v is not None for v in (hr_v, rr_v, temp_v))
+
+    if total >= 5:
+        interpretation = "HIGH"
+    elif total >= 3:
+        interpretation = "MEDIUM"
+    else:
+        interpretation = "LOW"
+
+    return {
+        "partial_news2_score": total,
+        "components": {
+            "hr_score": hr_score, "hr_value": hr_v,
+            "rr_score": rr_score, "rr_value": rr_v,
+            "temp_score": temp_score, "temp_value": temp_v,
+            "spo2_score": 0, "spo2_value": None, "spo2_note": "not available",
+            "sbp_score": 0, "sbp_value": None, "sbp_note": "not available",
+            "consciousness_score": 0, "consciousness_note": "assumed alert",
+        },
+        "missing_components": missing,
+        "coverage": f"{scored_count}/6 NEWS2 components scored from real data",
+        "interpretation": interpretation,
+        "caveat": ("Partial NEWS2 -- missing SpO2, BP, consciousness. Score is a lower "
+                   "bound. Full NEWS2 requires bedside SpO2 and BP measurement."),
     }
 
 
@@ -1031,44 +1154,87 @@ def push_main(argv: list[str] | None = None) -> None:
                 continue
 
             # Print provenance clearly before sending -- see load_real_vitals()'s
-            # docstring for why spo2/sbp/dbp are never "real" for this device.
+            # docstring for why spo2/sbp/dbp can never be "real" for this device.
             print("\n=== VITALS PROVENANCE ===")
             print(f"  vitals file: {vitals['vitals_file']} "
                   f"(time offset from ECG segment: {vitals['vitals_time_offset_ms']}ms)")
-            for key in ["hr", "spo2", "sbp", "dbp"]:
+            for key, unit in [("hr", "bpm"), ("respiratory_rate", "/min"), ("temperature", "C")]:
                 v = vitals[key]
                 real_flag = "REAL" if v["real"] else "NOT REAL"
-                val, src, note = v["value"], v["source"], v.get("note", "")
-                if v["real"] and key in ("hr", "spo2"):
-                    print(f"  {key.upper():5}: {val} [{real_flag} -- {src} -- "
-                          f"n={v.get('n_readings', '?')} readings, "
-                          f"range {v.get('min', '?')}-{v.get('max', '?')}]")
+                if v["real"]:
+                    print(f"  {key.upper():17}: {v['value']}{unit} [{real_flag} -- {v['source']} -- "
+                          f"n={v['n_readings']} readings, range {v['min']}-{v['max']}] {v.get('note', '')}")
                 else:
-                    print(f"  {key.upper():5}: {val} [{real_flag} -- {src}] {note}")
+                    print(f"  {key.upper():17}: {v['value']} [{real_flag} -- {v['source']}] {v.get('note', '')}")
+            p = vitals["posture"]
+            if p["real"]:
+                print(f"  {'POSTURE':17}: {p['most_common']} (most common) "
+                      f"[REAL -- {p['source']}] seen: {p['values']}")
+            else:
+                print(f"  {'POSTURE':17}: None [NOT REAL -- {p['source']}] {p.get('note', '')}")
+            for key in ["spo2", "sbp", "dbp"]:
+                v = vitals[key]
+                print(f"  {key.upper():17}: {v['value']} [NOT AVAILABLE -- {v['source']}] {v.get('note', '')}")
+            print("=========================\n")
+
+            # Compute partial NEWS2 locally regardless of whether the push below
+            # succeeds -- see compute_partial_news2()'s module comment.
+            partial_news2 = compute_partial_news2(vitals)
+            c = partial_news2["components"]
+            print(f"=== PARTIAL NEWS2 ({partial_news2['coverage'].split(' ')[0]} components) ===")
+            print(f"  HR score:   {c['hr_score']}  (HR={c['hr_value']})")
+            print(f"  RR score:   {c['rr_score']}  (RR={c['rr_value']})")
+            print(f"  Temp score: {c['temp_score']}  (Temp={c['temp_value']})")
+            print(f"  SpO2:       -- (not available)")
+            print(f"  SBP:        -- (not available)")
+            print(f"  AVPU:       -- (assumed alert=0)")
+            print(f"  Partial NEWS2: {partial_news2['partial_news2_score']} "
+                  f"({partial_news2['coverage']}) = {partial_news2['interpretation']} "
+                  f"(conservative lower bound)")
             print("=========================\n")
 
             # MedGemma-Agent's /vitals/snapshot schema requires all four fields as
             # non-null floats (REQUIRED_AGENT_VITALS_FIELDS, sourced from
-            # MedGemma-Agent/vitals/schemas.py:66-70) -- check completeness rather
+            # MedGemma-Agent/vitals/schemas.py:67-70) -- check completeness rather
             # than assuming; do not invent values to satisfy the schema.
+            #
+            # TODO (not done here -- MedGemma-Agent/ is read-only from this repo):
+            # to accept real VitalPatch pushes, MedGemma-Agent/vitals/schemas.py's
+            # VitalsSnapshotInput needs (a) systolic_bp/diastolic_bp/spo2 (lines
+            # 67-70) changed from `Field(...)` (required) to
+            # `Optional[float] = None`, PLUS matching `if v is None: return v`
+            # guards added to validate_sbp/validate_dbp/validate_spo2 (lines
+            # 80-106) and to validate_sbp_gt_dbp (lines 108-114) -- and
+            # MedGemma-Agent/guardrails/clinical_rules.py's calculate_news2/
+            # calculate_qsofa and their _score_* helpers (lines 28-124) need
+            # equivalent None-handling, since they currently crash (not
+            # degrade) on a None input. Confirmed by direct read this session --
+            # not a one-line schema change. (b) respiratory_rate and
+            # temperature have NO field at all in VitalsSnapshotInput today --
+            # adding them would be a new field, not a relaxation of an existing
+            # one. Neither (a) nor (b) is done here.
             missing_required = [
                 agent_field for agent_field in REQUIRED_AGENT_VITALS_FIELDS
                 if vitals[_AGENT_FIELD_TO_LOCAL_KEY[agent_field]]["value"] is None
             ]
             if missing_required:
-                print(f"ERROR: MedGemma-Agent's /vitals/snapshot requires "
+                print(f"SKIP: MedGemma-Agent's /vitals/snapshot requires "
                       f"{REQUIRED_AGENT_VITALS_FIELDS} as non-null values "
-                      f"(MedGemma-Agent/vitals/schemas.py:66-70, VitalsSnapshotInput) -- "
+                      f"(MedGemma-Agent/vitals/schemas.py:67-70, VitalsSnapshotInput) -- "
                       f"this segment is missing real values for {missing_required}. "
                       f"VitalPatch hardware cannot supply these (no SpO2/BP sensor -- see "
                       f"parse_vitalpatch_vitals()'s docstring in ecg_pipeline_core.py). "
-                      f"Skipping push rather than inventing values to satisfy the schema.")
+                      f"To enable push: make these fields Optional in "
+                      f"MedGemma-Agent/vitals/schemas.py (see TODO comment above for the "
+                      f"full scope of that change). Skipping push rather than inventing "
+                      f"values to satisfy the schema.")
                 print(json.dumps({
                     "segment_id": recording.segment_id,
                     "patient_id": recording.patient_id,
                     "n_beats": len(result.beats),
                     "ecg_risk": ecg_risk,
                     "vitals_provenance": vitals,
+                    "partial_news2": partial_news2,
                     "agent_response": None,
                     "push_skipped_reason": f"missing required Agent fields: {missing_required}",
                 }, indent=2, default=str))
@@ -1089,6 +1255,7 @@ def push_main(argv: list[str] | None = None) -> None:
                 "n_beats": len(result.beats),
                 "ecg_risk": ecg_risk,
                 "vitals_provenance": vitals,
+                "partial_news2": partial_news2,
                 "agent_response": response,
             }, indent=2, default=str))
             n_done += 1

@@ -30,6 +30,7 @@ establish. `report` has no vitals dependency at all.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import random
 import re
@@ -64,11 +65,153 @@ DEFAULT_API_KEY = "change-me-clinician-key"
 MIN_BEATS_FOR_ASSESSMENT = 5
 
 
-def load_mock_vitals_case() -> dict:
+# LEGACY: used simulated vitals from MedGemma-Agent/vitals/test_cases.yaml
+# Replaced by load_real_vitals() which reads actual VitalPatch vitals CSVs.
+# Kept for reference only -- not called by any production path.
+# See agent_bridge.py push_main() for the replacement.
+def _legacy_mock_vitals_case() -> dict:
     if str(AGENT_DIR) not in sys.path:
         sys.path.insert(0, str(AGENT_DIR))
     from vitals.mock_producer import list_test_cases
     return random.choice(list_test_cases())
+
+
+# MedGemma-Agent/vitals/schemas.py:66-70 (VitalsSnapshotInput) -- verified by direct
+# read: heart_rate, spo2, systolic_bp, diastolic_bp are ALL required (Field(...), no
+# default, each with its own physiological-range validator). Only ecg_risk and
+# snapshot_timestamp are optional/defaulted. None of the four may be omitted or null.
+REQUIRED_AGENT_VITALS_FIELDS = ["heart_rate", "spo2", "systolic_bp", "diastolic_bp"]
+_AGENT_FIELD_TO_LOCAL_KEY = {
+    "heart_rate": "hr", "spo2": "spo2", "systolic_bp": "sbp", "diastolic_bp": "dbp",
+}
+
+# Default pairing tolerance for load_real_vitals()'s nearest-timestamp match -- see
+# that function's docstring for how this number was derived (not a guess).
+DEFAULT_VITALS_MAX_OFFSET_MS = 30_000
+
+
+def load_real_vitals(ecg_path: str, vitals_root: str,
+                      max_offset_ms: int = DEFAULT_VITALS_MAX_OFFSET_MS) -> dict:
+    """Loads real VitalPatch vitals for the ECG segment at ecg_path, from the
+    companion vitals CSV under vitals_root/<same Patch_<ID> folder>/.
+
+    TWO CORRECTIONS made here vs. the original task assumptions, both verified
+    directly against the real files on disk before writing this function (not
+    assumed):
+
+    1. FILE PAIRING IS NOT AN EXACT FILENAME MATCH. The claim that ECG and
+       vitals files share an identical timestamp prefix does not hold: checked
+       all 424 ECG files for Patch_184B2F against all 425 vitals files in the
+       same folder -- an exact "_ecg.csv"->"_vitals.csv" substring swap matched
+       0/424. The two collector streams log independent timestamps for what is
+       otherwise the same capture session. Measured nearest-timestamp offset
+       distribution across all 424 files: p50=4.5s, p90=11.4s, 95.3% of files
+       have a nearest vitals file within 15s, 98.3% within 30s, and the
+       remaining ~1.7% plateau even at 300s (genuine gaps -- no nearby vitals
+       recording exists at all, not a tolerance problem). 30s was chosen as
+       the default cutoff: tight enough that a paired HR reading is still
+       describing approximately the same clinical moment as the ECG segment,
+       loose enough to cover 98.3% of real pairs. The actual offset used is
+       always returned in "vitals_time_offset_ms" so a caller/reviewer can
+       judge staleness of any specific pairing rather than trusting a single
+       hardcoded cutoff blindly.
+
+    2. COLUMN 7 IS NOT SPO2. The task assumed col 7 = SpO2. Inspecting the
+       real file (11 columns, no header) shows col 1 = HR (bpm) is a genuine,
+       varying sensor signal (24 distinct values across 789 readings in one
+       file, physiologically plausible range) -- that assumption holds. But
+       col 7 is NOT SpO2: within any single file it is one constant value
+       repeated ~300 times (zero variance -- no real vital does that), and
+       that constant varies wildly and non-physiologically ACROSS files for
+       the same patient (checked 8 files: 2, 3, 7, 16, 17, 20, 32, 47, 75 --
+       most are outside any clinical SpO2 range). This is a per-file
+       device/session metadata value, not a measurement. This independently
+       confirms parse_vitalpatch_vitals()'s own docstring in
+       ecg_pipeline_core.py: "VitalPatch has no SpO2/BP sensor on this
+       hardware, so those columns are sentinel values if present." SpO2 is
+       therefore always reported as unavailable here (mirrors how BP is
+       already handled), never fabricated from col 7.
+
+    Only HR is ever marked "real": True by this function.
+    """
+    ecg_path = Path(ecg_path)
+    vitals_root = Path(vitals_root)
+    patient_dir = vitals_root / ecg_path.parent.name
+
+    try:
+        ecg_ts = int(ecg_path.name.split("_")[0])
+    except (ValueError, IndexError):
+        ecg_ts = None
+
+    best_path, best_offset = None, None
+    if ecg_ts is not None and patient_dir.is_dir():
+        for candidate in patient_dir.glob("*_vitals.csv"):
+            try:
+                cand_ts = int(candidate.name.split("_")[0])
+            except ValueError:
+                continue
+            offset = abs(cand_ts - ecg_ts)
+            if best_offset is None or offset < best_offset:
+                best_offset, best_path = offset, candidate
+
+    vitals_path = best_path if (best_path is not None and best_offset <= max_offset_ms) else None
+
+    if vitals_path is None:
+        attempted = (str(best_path) if best_path is not None
+                     else str(patient_dir / ecg_path.name.replace("_ecg.csv", "_vitals.csv")))
+        return {
+            "hr": {"value": None, "source": "not_found", "real": False},
+            "spo2": {"value": None, "source": "not_found", "real": False},
+            "sbp": {"value": None, "source": "not_available", "real": False},
+            "dbp": {"value": None, "source": "not_available", "real": False},
+            "vitals_file": attempted,
+            "vitals_file_found": False,
+            "vitals_time_offset_ms": best_offset,
+        }
+
+    # col 1 = HR (bpm) -- confirmed real, see docstring correction #2 above.
+    hr_values: list[float] = []
+    with open(vitals_path, newline="") as fh:
+        for row in csv.reader(fh):
+            if len(row) <= 1 or not row[1]:
+                continue
+            try:
+                v = float(row[1])
+            except ValueError:
+                continue
+            if 20 <= v <= 300:
+                hr_values.append(v)
+
+    if hr_values:
+        hr = {
+            "value": round(sum(hr_values) / len(hr_values), 1),
+            "min": min(hr_values),
+            "max": max(hr_values),
+            "n_readings": len(hr_values),
+            "source": "vitalpatch_vitals_csv",
+            "real": True,
+        }
+    else:
+        hr = {"value": None, "source": "vitalpatch_vitals_csv", "real": False,
+              "note": "no valid HR readings in vitals file"}
+
+    # SpO2 is never extracted from col 7 -- see docstring correction #2 above.
+    spo2 = {"value": None, "source": "not_available", "real": False,
+            "note": "VitalPatch has no SpO2 sensor -- col 7 of this file format is a "
+                    "per-file constant metadata value, not a physiological reading "
+                    "(verified across 9 patient files); see parse_vitalpatch_vitals() "
+                    "in ecg_pipeline_core.py"}
+    sbp = {"value": None, "source": "not_available", "real": False,
+           "note": "VitalPatch does not measure BP"}
+    dbp = {"value": None, "source": "not_available", "real": False,
+           "note": "VitalPatch does not measure BP"}
+
+    return {
+        "hr": hr, "spo2": spo2, "sbp": sbp, "dbp": dbp,
+        "vitals_file": str(vitals_path),
+        "vitals_file_found": True,
+        "vitals_time_offset_ms": best_offset,
+    }
 
 
 def load_classifier(classifier_path: Path) -> FiveClassBeatClassifier:
@@ -848,6 +991,9 @@ def report_main(argv: list[str] | None = None) -> None:
 def push_main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--vitalpatch-root", type=Path, default=DATA_RAW / "vitalpatch")
+    parser.add_argument("--vitals-root", type=Path,
+                         default=Path("/home2/mahimakopalley/projects/data/vitals_downloads"),
+                         help="Root directory of VitalPatch vitals CSV files")
     parser.add_argument("--classifier", type=Path, default=MODELS_DIR / "five_class_xgb.json")
     parser.add_argument("--agent-url", default=DEFAULT_AGENT_URL)
     parser.add_argument("--api-key", default=DEFAULT_API_KEY)
@@ -872,15 +1018,77 @@ def push_main(argv: list[str] | None = None) -> None:
             if n_done >= args.limit:
                 break
             ecg_risk, result = run_ecg_segment(recording, classifier)
-            mock_case = load_mock_vitals_case()
-            response = submit_to_agent(recording.patient_id, mock_case["vitals"], ecg_risk,
+            vitals = load_real_vitals(ecg_path=str(f), vitals_root=str(args.vitals_root))
+
+            if not vitals["vitals_file_found"]:
+                print(f"WARNING: No vitals file found within "
+                      f"{DEFAULT_VITALS_MAX_OFFSET_MS}ms of {f} "
+                      f"(nearest candidate: {vitals['vitals_file']}, "
+                      f"offset={vitals['vitals_time_offset_ms']}ms)")
+                print("WARNING: Skipping push to MedGemma Agent for this segment -- "
+                      "will not send None vitals to clinical endpoint.")
+                n_done += 1
+                continue
+
+            # Print provenance clearly before sending -- see load_real_vitals()'s
+            # docstring for why spo2/sbp/dbp are never "real" for this device.
+            print("\n=== VITALS PROVENANCE ===")
+            print(f"  vitals file: {vitals['vitals_file']} "
+                  f"(time offset from ECG segment: {vitals['vitals_time_offset_ms']}ms)")
+            for key in ["hr", "spo2", "sbp", "dbp"]:
+                v = vitals[key]
+                real_flag = "REAL" if v["real"] else "NOT REAL"
+                val, src, note = v["value"], v["source"], v.get("note", "")
+                if v["real"] and key in ("hr", "spo2"):
+                    print(f"  {key.upper():5}: {val} [{real_flag} -- {src} -- "
+                          f"n={v.get('n_readings', '?')} readings, "
+                          f"range {v.get('min', '?')}-{v.get('max', '?')}]")
+                else:
+                    print(f"  {key.upper():5}: {val} [{real_flag} -- {src}] {note}")
+            print("=========================\n")
+
+            # MedGemma-Agent's /vitals/snapshot schema requires all four fields as
+            # non-null floats (REQUIRED_AGENT_VITALS_FIELDS, sourced from
+            # MedGemma-Agent/vitals/schemas.py:66-70) -- check completeness rather
+            # than assuming; do not invent values to satisfy the schema.
+            missing_required = [
+                agent_field for agent_field in REQUIRED_AGENT_VITALS_FIELDS
+                if vitals[_AGENT_FIELD_TO_LOCAL_KEY[agent_field]]["value"] is None
+            ]
+            if missing_required:
+                print(f"ERROR: MedGemma-Agent's /vitals/snapshot requires "
+                      f"{REQUIRED_AGENT_VITALS_FIELDS} as non-null values "
+                      f"(MedGemma-Agent/vitals/schemas.py:66-70, VitalsSnapshotInput) -- "
+                      f"this segment is missing real values for {missing_required}. "
+                      f"VitalPatch hardware cannot supply these (no SpO2/BP sensor -- see "
+                      f"parse_vitalpatch_vitals()'s docstring in ecg_pipeline_core.py). "
+                      f"Skipping push rather than inventing values to satisfy the schema.")
+                print(json.dumps({
+                    "segment_id": recording.segment_id,
+                    "patient_id": recording.patient_id,
+                    "n_beats": len(result.beats),
+                    "ecg_risk": ecg_risk,
+                    "vitals_provenance": vitals,
+                    "agent_response": None,
+                    "push_skipped_reason": f"missing required Agent fields: {missing_required}",
+                }, indent=2, default=str))
+                n_done += 1
+                continue
+
+            vitals_values = {
+                "heart_rate": vitals["hr"]["value"],
+                "spo2": vitals["spo2"]["value"],
+                "systolic_bp": vitals["sbp"]["value"],
+                "diastolic_bp": vitals["dbp"]["value"],
+            }
+            response = submit_to_agent(recording.patient_id, vitals_values, ecg_risk,
                                         args.agent_url, args.api_key)
             print(json.dumps({
                 "segment_id": recording.segment_id,
                 "patient_id": recording.patient_id,
                 "n_beats": len(result.beats),
                 "ecg_risk": ecg_risk,
-                "vitals_source_case": mock_case["id"],
+                "vitals_provenance": vitals,
                 "agent_response": response,
             }, indent=2, default=str))
             n_done += 1

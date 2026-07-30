@@ -95,19 +95,52 @@ _AGENT_FIELD_TO_LOCAL_KEY = {
 # that function's docstring for how this number was derived (not a guess).
 DEFAULT_VITALS_MAX_OFFSET_MS = 30_000
 
+# Default window for _extract_numeric_column()'s optional row-proximity filter
+# (HANDOFF.md item 6): +/- 2 minutes around the ECG timestamp. Chosen, not
+# measured, from the real per-row sampling rate on these files -- HR/RR/Temp
+# are each logged every 4s (verified across all 3 columns on a sample file),
+# so a 4-minute-wide window still yields ~60 readings per vital, enough for a
+# stable average, while being far more time-localized than averaging the
+# whole ~20-minute file. This is a judgment call, not a clinically validated
+# window size (see HANDOFF.md item 9 on calibration being unfinished).
+DEFAULT_VITALS_WINDOW_MS = 120_000
 
-def _extract_numeric_column(vitals_path: Path, col_idx: int, lo: float, hi: float) -> list[float]:
+
+def _extract_numeric_column(vitals_path: Path, col_idx: int, lo: float, hi: float,
+                             center_ts: int | None = None,
+                             window_ms: int | None = None) -> list[float]:
+    """Extracts valid (lo <= v <= hi) numeric values from column col_idx.
+
+    If center_ts is given, restricts to rows whose own timestamp (col 0) is
+    within window_ms of center_ts -- i.e. the vitals rows nearest the moment
+    of the ECG, not every row in the (up to ~20-minute) file. Falls back to
+    the unrestricted (whole-file) extraction if no rows fall inside that
+    window, so windowing can only make the reading more time-localized, never
+    produce a value where the unwindowed extraction found none.
+    """
     values: list[float] = []
     with open(vitals_path, newline="") as fh:
         for row in csv.reader(fh):
             if len(row) <= col_idx or not row[col_idx]:
                 continue
+            if center_ts is not None:
+                if not row[0]:
+                    continue
+                try:
+                    row_ts = int(row[0])
+                except ValueError:
+                    continue
+                if abs(row_ts - center_ts) > window_ms:
+                    continue
             try:
                 v = float(row[col_idx])
             except ValueError:
                 continue
             if lo <= v <= hi:
                 values.append(v)
+
+    if not values and center_ts is not None:
+        return _extract_numeric_column(vitals_path, col_idx, lo, hi)
     return values
 
 
@@ -315,13 +348,18 @@ def load_real_vitals(ecg_path: str, vitals_root: str,
             "vitals_match_method": None,
         }
 
-    hr = _numeric_stat_dict(_extract_numeric_column(vitals_path, 1, 20, 300),
-                             "vitalpatch_col1")
+    hr = _numeric_stat_dict(
+        _extract_numeric_column(vitals_path, 1, 20, 300,
+                                 center_ts=ecg_ts, window_ms=DEFAULT_VITALS_WINDOW_MS),
+        "vitalpatch_col1")
     respiratory_rate = _numeric_stat_dict(
-        _extract_numeric_column(vitals_path, 2, 4, 60), "vitalpatch_col2",
-        note="VitalPatch-derived RR -- not spirometry")
+        _extract_numeric_column(vitals_path, 2, 4, 60,
+                                 center_ts=ecg_ts, window_ms=DEFAULT_VITALS_WINDOW_MS),
+        "vitalpatch_col2", note="VitalPatch-derived RR -- not spirometry")
     temperature = _numeric_stat_dict(
-        _extract_numeric_column(vitals_path, 3, 35.0, 42.0), "vitalpatch_col3",
+        _extract_numeric_column(vitals_path, 3, 35.0, 42.0,
+                                 center_ts=ecg_ts, window_ms=DEFAULT_VITALS_WINDOW_MS),
+        "vitalpatch_col3",
         note="Skin temperature -- may underestimate core temp by ~0.5C")
 
     posture_values: list[str] = []

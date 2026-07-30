@@ -15,16 +15,18 @@ not measured is marked `[UNVERIFIED]`.
 
 | Question | Answer | Source |
 |---|---|---|
-| Is the ECG pipeline complete end-to-end? | **Yes**, 9 stages, run on 3,570 real segments | `data/reports/vitalpatch_run_manifest.csv` |
-| How often is real VitalPatch ECG assessable? | **78.3%** (2,795 / 3,570 segments) | ibid. |
-| How often are vitals pairable to an ECG segment? | **60.3%** under the current rule; **95.3%** achievable with a corrected rule | measured, §7.2 |
+| Is the ECG pipeline complete end-to-end? | **Yes**, 9 stages, run on 3,628 real segments (re-run 2026-07-30) | `data/reports/vitalpatch_run_manifest.csv` |
+| How often is real VitalPatch ECG assessable? | **79.6%** (2,889 / 3,628 segments) | ibid. |
+| How often are vitals pairable to an ECG segment? | **100.0%** (2,375/2,375) after the 2026-07-30 fix; was 60.3% | measured, §7.2 |
 | How many NEWS2 components can VitalPatch supply? | **3 of 6** (HR, RR, Temp). SpO2 and BP have no sensor. | §7.1 |
 | Do vitals change the ECG risk level? | **0 / 14** in the only multimodal run that exists | `sample14_manifest_preserved.json` |
 | Is the multimodal batch complete? | **No.** 14 of ~3,570 segments. Killed by SLURM time limit. | §8 |
 
-The single most important open item is **not** the SpO2/BP hardware gap. It is
-that the vitals-pairing rule is discarding a third of the data it could use
-(§7.2), and that the multimodal batch has never completed (§8).
+The single most important open item is **not** the SpO2/BP hardware gap. The
+vitals-pairing bug that was discarding ~40% of usable data is fixed as of
+2026-07-30 (§7.2). What remains is that the multimodal batch has never
+completed (§8) — that determines whether vitals actually change any risk
+levels at scale, and is still unanswered.
 
 ---
 
@@ -267,39 +269,46 @@ in both `ecg_pipeline_core.py` and `ecg_inference/classifier.py`.
 
 ## 6. ECG-only results on real device data
 
-### 6.1 VitalPatch — complete batch, 3,570 segments
+### 6.1 VitalPatch — complete batch, 3,628 segments
 
-*Source: `data/reports/vitalpatch_run_manifest.csv`, aggregated 2026-07-29.
-Note: `Docs/PROJECT_OVERVIEW.md` §7 still quotes a 902-segment partial snapshot —
-that batch has since completed and the numbers below supersede it.*
+*Source: `data/reports/vitalpatch_run_manifest.csv`, regenerated 2026-07-30 via
+`python -m ecg_pipeline.batch_vitalpatch_report` after the `-` sentinel parser
+fix (the previous manifest, aggregated 2026-07-29, predated that fix and had 70
+`PARSE_ERROR` rows out of 3,570 — those numbers are superseded below). Note:
+`Docs/PROJECT_OVERVIEW.md` §7 still quotes a 902-segment partial snapshot —
+that batch has since completed and the numbers below supersede it too.*
 
 | Metric | Value |
 |---|---|
-| Segments processed | 3,570 |
-| Total signal | **81.9 hours** |
-| Median segment duration | 117.0 s |
-| Total beats analyzed | 357,909 |
-| Median quality score | 0.889 |
-| **Assessable** | **2,795 (78.3%)** |
-| NOT_ASSESSABLE | 775 (21.7%) |
+| Segments processed | 3,628 |
+| Total signal | **84.3 hours** |
+| Median segment duration | 116.9 s |
+| Total beats analyzed | 368,072 |
+| Median quality score | 0.88 |
+| **Assessable** | **2,889 (79.6%)** |
+| NOT_ASSESSABLE | 739 (20.4%) |
+| Parse errors | 0 |
 
 **Risk distribution:**
 
 | Level | Count | % of all | % of assessable |
 |---|---|---|---|
-| LOW | 1,832 | 51.3% | 65.5% |
-| MEDIUM | 159 | 4.5% | 5.7% |
-| HIGH | 527 | 14.8% | 18.9% |
-| CRITICAL | 277 | 7.8% | 9.9% |
-| NOT_ASSESSABLE | 705 | 19.7% | — |
-| (parse error) | 70 | 2.0% | — |
+| LOW | 1,881 | 51.8% | 65.1% |
+| MEDIUM | 166 | 4.6% | 5.7% |
+| HIGH | 552 | 15.2% | 19.1% |
+| CRITICAL | 290 | 8.0% | 10.0% |
+| NOT_ASSESSABLE | 739 | 20.4% | — |
+| (parse error) | 0 | 0.0% | — |
 
-**Rhythm findings present:** 1,328 of 3,500 parsed segments (37.9%).
+**Rhythm findings present (`n_rhythm_findings` > 0):** 1,220 of 3,628 segments
+(33.6%). Segments with an AFIB_SUSPECTED/VT/PVC finding specifically
+(`has_afib_vt_pvc_finding`): 1,385 of 3,628 (38.2%).
 
-**This is the headline ECG-only result: 78.3% assessability on real,
-uncontrolled, at-home wearable data.**
+**This is the current headline ECG-only result: 79.6% assessability on real,
+uncontrolled, at-home wearable data** — up from a previously-reported 78.3%
+that was computed on the stale, pre-parser-fix manifest.
 
-**A caution that must not be lost:** 9.9% of assessable segments are CRITICAL.
+**A caution that must not be lost:** 10.0% of assessable segments are CRITICAL.
 That is a very high rate for a recovering post-op cohort and is **not
 independently validated** — there is no ground truth on this corpus. It is at
 least as likely to reflect classifier false positives on noisy single-lead data
@@ -399,13 +408,35 @@ within `[first_row_ts, last_row_ts]` of a vitals file. Measured:
 | Patch_184B2F | 98.3% | 85.1% |
 | **Overall** | **60.3%** | **95.3%** |
 
-**Switching the pairing rule recovers vitals for 831 additional ECG segments —
-from 60.3% to 95.3% coverage.** This is a bug in the pairing heuristic, not a
-data limitation.
+*(Two patients drop slightly under containment alone — 183594 and 184B2F —
+because a few of their ECGs fall in gaps between vitals files.)*
 
-*(Two patients drop slightly under containment — 183594 and 184B2F — because a
-few of their ECGs fall in gaps between vitals files. A production rule should
-take the union: containment first, nearest-within-30 s as fallback.)*
+**Fixed 2026-07-30** (`ecg_pipeline/agent_bridge.py`, commit `709e225`):
+`load_real_vitals()` now takes the union — interval containment first, the
+original nearest-filename-within-30s rule as fallback for gap cases. Re-measured
+on all 2,375 real ECG files (`ecg_pipeline/verify_vitals_pairing.py`):
+
+| Patient | Containment only | + 30s fallback (shipped) |
+|---|---|---|
+| Patch_183594 | 95.2% (275/289) | 100.0% (289/289) |
+| Patch_1844AC | 100.0% (501/501) | 100.0% (501/501) |
+| Patch_184635 | 92.1% (441/479) | 100.0% (479/479) |
+| Patch_1849DF | 100.0% (502/502) | 100.0% (502/502) |
+| Patch_184B27 | 100.0% (180/180) | 100.0% (180/180) |
+| Patch_184B2F | 84.9% (360/424) | 100.0% (424/424) |
+| **Overall** | **95.1% (2,259/2,375)** | **100.0% (2,375/2,375)** |
+
+The containment-only column matches the ~95.3% figure predicted in the table
+above (within ~0.6 points per patient), confirming the predicted fix works as
+expected. The combined figure is higher than that ~95.3% prediction: almost
+every ECG that misses containment turns out to be within seconds of a vitals
+file's boundary (median 2.0s, since vitals files for these patients chain
+together nearly back-to-back), so the 30s fallback — which the pairing rule
+was always meant to keep — catches nearly all of them. **Real, measured
+coverage after the fix is 100.0% (2,375/2,375), not an estimate.** This
+switches vitals from 60.3% to 100.0% coverage — 943 additional ECG segments
+gain real vitals. This was a bug in the pairing heuristic, not a data
+limitation.
 
 ### 7.3 Changes made to make partial vitals work
 

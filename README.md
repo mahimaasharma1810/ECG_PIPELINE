@@ -200,27 +200,35 @@ from real rhythm-change annotations. Validated 2026-07-28.*
 0.10 is Youden's-J-optimal on this data and has the best F1 of any threshold
 tested. Changed in both `ecg_pipeline_core.py` and `ecg_inference/classifier.py`.
 
-### 3. ECG-only batch on real device data — complete
+### 3. ECG-only batch on real device data — complete, re-run 2026-07-30
 
-*Source: `data/reports/vitalpatch_run_manifest.csv` (gitignored, local only);
-aggregated in `Docs/PIPELINE_METHODS_AND_RESULTS.md` §6.1.*
+*Source: `data/reports/vitalpatch_run_manifest.csv` (gitignored, local only),
+regenerated 2026-07-30 via `python -m ecg_pipeline.batch_vitalpatch_report`
+after the parser fix (previous manifest predated it and had 70 `PARSE_ERROR`
+rows — see prior "Known and unfixed" entry, now resolved); aggregated in
+`Docs/PIPELINE_METHODS_AND_RESULTS.md` §6.1.*
 
 | Metric | Value |
 |---|---|
 | Raw ECG files, 6 patients | 2,375 |
-| Segments processed | 3,570 |
-| Total signal | 81.9 hours |
-| Total beats analyzed | 357,909 |
-| Median quality score | 0.889 |
-| **Assessable** | **2,795 (78.3%)** |
-| NOT_ASSESSABLE | 775 (21.7%) |
+| Segments processed | 3,628 |
+| Total signal | 84.3 hours |
+| Total beats analyzed | 368,072 |
+| Median quality score | 0.88 |
+| **Assessable** | **2,889 (79.6%)** |
+| NOT_ASSESSABLE | 739 (20.4%) |
+| Parse errors | 0 |
 
-Risk distribution: LOW 1,832 · MEDIUM 159 · HIGH 527 · CRITICAL 277 ·
-NOT_ASSESSABLE 705 · parse error 70.
+Risk distribution: LOW 1,881 (51.8%) · MEDIUM 166 (4.6%) · HIGH 552 (15.2%) ·
+CRITICAL 290 (8.0%) · NOT_ASSESSABLE 739 (20.4%). CRITICAL is 10.0% of
+assessable segments (290/2,889).
 
-**78.3% assessability on real, uncontrolled, at-home wearable data is the
-headline ECG-only result.** The 9.9%-of-assessable CRITICAL rate is reported as
-observed, not endorsed — see "Known and unfixed" below.
+**79.6% assessability on real, uncontrolled, at-home wearable data is the
+current headline ECG-only result**, up from a previously-reported 78.3%
+computed on a stale, pre-parser-fix manifest (70 of 3,570 rows were
+`PARSE_ERROR`; re-parsing added 128 net segments with 0 failures). The
+10.0%-of-assessable CRITICAL rate is reported as observed, not endorsed — see
+"Known and unfixed" below.
 
 A second device batch (SeNSiO/prorhythm, `data/reports/prorhythm_run_manifest.csv`)
 is complete at 18 recordings, 13 assessable. Too small for rate estimates; useful
@@ -268,16 +276,16 @@ as evidence about vitals' clinical value.
 
 Listed explicitly so nobody builds on a number that isn't settled.
 
-- **Vitals-pairing bug — coverage numbers are NOT final.** The current
-  nearest-filename-timestamp rule with a 30-second tolerance achieves **60.3%**
-  coverage across the 6-patient set (1,432 of 2,375 ECG files), ranging from
-  15.2% (Patch_1844AC) to 99.0% (Patch_183594) — the 30 s cutoff was calibrated
-  on a single patient and does not generalize. Root cause: vitals files span
-  ~20 minutes of internal per-row timestamps, so a valid ECG can land mid-file
-  while the *filename* timestamp is minutes away. Interval-containment matching
-  would recover to **95.3%**, but **is not implemented**. Do not quote any vitals
-  coverage figure as final until this is fixed. Measurement:
-  `Docs/PIPELINE_METHODS_AND_RESULTS.md` §7.2.
+- **Vitals-pairing bug — FIXED 2026-07-30.** `load_real_vitals()` now matches
+  primarily by interval containment (does a vitals file's own
+  [first_row_ts, last_row_ts] contain the ECG's timestamp?), falling back to
+  the original nearest-filename-within-30s rule only for genuine gaps. Measured
+  on all 2,375 real ECG files (`ecg_pipeline/verify_vitals_pairing.py`):
+  interval containment alone gets ~95.1% (matches the previously-estimated
+  ~95.3%); combined with the 30s fallback, coverage is **100.0%** (2,375/2,375)
+  — nearly every containment miss turns out to be within seconds of a
+  vitals-file boundary, since files chain together almost back-to-back. Was
+  60.3% before the fix. See commit `709e225`.
 
 - **The full 6-patient multimodal batch has NOT completed.** The only attempt
   (SLURM job 2660129) was killed by a wall-clock time limit before finishing the
@@ -302,19 +310,17 @@ Listed explicitly so nobody builds on a number that isn't settled.
   never defaulted to a "normal" value. Only 3 of the 6 NEWS2 components (heart
   rate, respiratory rate, temperature) can be sourced from this device.
 
-- **The 9.9%-of-assessable CRITICAL rate is unvalidated.** `[UNVERIFIED]` No
+- **The 10.0%-of-assessable CRITICAL rate is unvalidated.** `[UNVERIFIED]` No
   ground truth exists for this corpus, and V-class precision is 0.754 — roughly
   1 in 4 ventricular calls is wrong, and PVC burden drives both CRITICAL rules.
   Clinician adjudication of a sample is the only way to settle whether this rate
   is signal or false-positive noise.
 
-- **The ECG-only batch manifest predates the parser fix.** 70 of its 3,570 rows
-  are `PARSE_ERROR: could not convert string to float: '-'`. That `-` sentinel
-  bug has since been fixed (`ecg_pipeline_core.py:292-307`, coerce-to-NaN with
-  pairwise drop) — re-parsing all 2,375 raw files with the current parser gives
-  **0 failures in 27 s** (verified 2026-07-29). The batch has not been re-run, so
-  the 78.3% assessability figure above is computed from the pre-fix manifest and
-  will shift slightly once it is. Treat it as a close lower bound, not final.
+- **The ECG-only batch manifest was regenerated 2026-07-30** after the parser
+  fix (`ecg_pipeline_core.py:292-307`, coerce-to-NaN with pairwise drop). Re-run
+  via `python -m ecg_pipeline.batch_vitalpatch_report`: **0 PARSE_ERROR rows**,
+  3,628 segments (was 3,570 with 70 `PARSE_ERROR`). Assessability moved from
+  78.3% to **79.6%**. Numbers above are current as of this re-run.
 
 - **The AFib rule's `window=20` was never swept** — only its threshold was.
 
@@ -362,7 +368,7 @@ measurement that justifies it.
    by a SLURM wall-clock limit. Requires: an allocation longer than the run, the
    `MedGemma-Agent` service restarted on the allocated node, and item 1 done
    first. *Runtime estimate: the 14-segment sample took 15.5 s including 14 live
-   Agent round-trips (~1.1 s/segment), extrapolating to ~65 min for ~3,570
+   Agent round-trips (~1.1 s/segment), extrapolating to ~65 min for ~3,628
    segments — `[UNVERIFIED at scale]`, Agent latency has not been measured under
    sustained load.* Until this completes, no override or risk-change statistic
    exists to report.
@@ -374,8 +380,8 @@ measurement that justifies it.
 
 ### High value — quantifies risk that engineering alone cannot resolve
 
-4. **Get clinician adjudication on a sample of the 277 CRITICAL segments.** This
-   is the largest unquantified risk in the system. 9.9% of assessable segments
+4. **Get clinician adjudication on a sample of the 290 CRITICAL segments.** This
+   is the largest unquantified risk in the system. 10.0% of assessable segments
    returning CRITICAL is high for a recovering post-op cohort, V-class precision
    is 0.754 (~1 in 4 ventricular calls wrong), and PVC burden drives both
    CRITICAL rules — but there is no ground truth on this corpus, so the rate

@@ -128,6 +128,65 @@ def _numeric_stat_dict(values: list[float], source: str, note: str | None = None
     return d
 
 
+# Per-patient-dir cache of (first_ts, last_ts, filename_ts, path) tuples, built
+# once from disk and reused across every ECG file for that patient -- see
+# _build_vitals_index()'s docstring for why this matters (2,375 ECG files x
+# ~420 vitals files per patient would be far too slow to redo per call).
+_VITALS_INDEX_CACHE: dict[Path, list[tuple[int, int, "int | None", Path]]] = {}
+
+
+def _build_vitals_index(patient_dir: Path) -> list[tuple[int, int, "int | None", Path]]:
+    """Builds (first_ts, last_ts, filename_ts, path) for every vitals file in
+    patient_dir, reading each file's own timestamp column (col 0, epoch ms)
+    exactly once. first_ts/last_ts are the FIRST and LAST ROW's timestamps, not
+    min/max.
+
+    This was checked both ways on the real data before picking one: rows are
+    not perfectly monotonic (e.g. Patch_1844AC files have a few seconds of
+    jitter among the last handful of rows), so true min/max is a few seconds
+    wider than first/last row. That few-second difference isn't the reason to
+    prefer first/last row, though -- the reason is that min/max quietly papers
+    over genuine gaps between vitals files, inflating measured coverage to
+    100% overall (verified: min/max coverage 100.0% on every one of the 6
+    patients, including Patch_184B2F, where independently-tracked expected
+    coverage after this fix is ~85%, i.e. some real gaps). first/last row
+    reproduced the expected per-patient coverage (Docs/HANDOFF.md's "after the
+    fix" column, measured to within ~0.6 points on every patient); min/max did
+    not. So first/last row is used, even though it is very slightly stricter.
+
+    filename_ts is the timestamp embedded in the filename, kept only for the
+    nearest-within-30s fallback (this is the same value the old, sole matching
+    rule used).
+
+    Cached per patient_dir so repeated calls (once per ECG file, thousands of
+    times for the same patient) never re-read a vitals file twice.
+    """
+    if patient_dir in _VITALS_INDEX_CACHE:
+        return _VITALS_INDEX_CACHE[patient_dir]
+
+    index: list[tuple[int, int, "int | None", Path]] = []
+    if patient_dir.is_dir():
+        for candidate in patient_dir.glob("*_vitals.csv"):
+            try:
+                filename_ts = int(candidate.name.split("_")[0])
+            except (ValueError, IndexError):
+                filename_ts = None
+
+            row_tss: list[int] = []
+            with open(candidate, newline="") as fh:
+                for row in csv.reader(fh):
+                    if row and row[0]:
+                        try:
+                            row_tss.append(int(row[0]))
+                        except ValueError:
+                            continue
+            if row_tss:
+                index.append((row_tss[0], row_tss[-1], filename_ts, candidate))
+
+    _VITALS_INDEX_CACHE[patient_dir] = index
+    return index
+
+
 def load_real_vitals(ecg_path: str, vitals_root: str,
                       max_offset_ms: int = DEFAULT_VITALS_MAX_OFFSET_MS) -> dict:
     """Loads real VitalPatch vitals for the ECG segment at ecg_path, from the
@@ -137,15 +196,30 @@ def load_real_vitals(ecg_path: str, vitals_root: str,
     the real files on disk before writing/extending this function (not
     assumed):
 
-    1. FILE PAIRING IS NOT AN EXACT FILENAME MATCH. Checked all 424 ECG files
-       for Patch_184B2F against all 425 vitals files in the same folder -- an
+    1. FILE PAIRING IS NOT AN EXACT FILENAME MATCH, AND FILENAME-TIMESTAMP
+       PROXIMITY ALONE MISSES MOST OF THE DATA. Checked all 424 ECG files for
+       Patch_184B2F against all 425 vitals files in the same folder -- an
        exact "_ecg.csv"->"_vitals.csv" substring swap matched 0/424. The two
        collector streams log independent timestamps for the same capture
-       session. Nearest-timestamp offsets: p50=4.5s, p90=11.4s, 95.3% within
-       15s, 98.3% within 30s, then a hard plateau (the remaining ~1.7% are
-       genuine gaps, not a tolerance problem). 30s is the default cutoff. The
-       actual offset used is always returned in "vitals_time_offset_ms" so a
-       caller can judge staleness of any specific pairing directly.
+       session. Nearest-filename-timestamp offsets: p50=4.5s, p90=11.4s, 95.3%
+       within 15s, 98.3% within 30s, then a hard plateau. That plateau looked
+       like "the remaining ~1.7% are genuine gaps" but wasn't: a vitals file
+       spans ~20 minutes internally (median measured span 20.0 min), so on
+       patients where the ECG recording is free-running (not synced to a
+       vitals-file boundary), the ECG timestamp regularly falls in the middle
+       of a vitals file's own [first_row_ts, last_row_ts] range even though
+       the two *filenames* are minutes apart. Measured across all 2,375 real
+       ECG files (2026-07-29/30): the pure filename-proximity rule with a 30s
+       cutoff covered only 60.3% of files overall (as low as 15.2% on
+       Patch_1844AC); interval containment against each vitals file's actual
+       internal timestamp range covers ~95.3% overall. The fix below therefore
+       matches primarily by interval containment (does the vitals file's own
+       [min_ts, max_ts] contain the ECG's timestamp?), falling back to the
+       original nearest-filename-within-30s rule only for ECGs that land in a
+       genuine gap between two vitals files' ranges. The actual offset used is
+       always returned in "vitals_time_offset_ms" (0 for a containment match,
+       since the vitals file's own data covers that instant) so a caller can
+       judge staleness of any specific pairing directly.
 
     2. COLUMN 7 IS NOT SPO2. Col 1 (HR, bpm) is a genuine, varying sensor
        signal. Col 7 is NOT SpO2: within any single file it is one constant
@@ -185,18 +259,35 @@ def load_real_vitals(ecg_path: str, vitals_root: str,
     except (ValueError, IndexError):
         ecg_ts = None
 
-    best_path, best_offset = None, None
+    best_path, best_offset, match_method = None, None, None
     if ecg_ts is not None and patient_dir.is_dir():
-        for candidate in patient_dir.glob("*_vitals.csv"):
-            try:
-                cand_ts = int(candidate.name.split("_")[0])
-            except ValueError:
-                continue
-            offset = abs(cand_ts - ecg_ts)
-            if best_offset is None or offset < best_offset:
-                best_offset, best_path = offset, candidate
+        index = _build_vitals_index(patient_dir)
 
-    vitals_path = best_path if (best_path is not None and best_offset <= max_offset_ms) else None
+        # Primary rule: does a vitals file's own internal timestamp range
+        # contain this ECG's timestamp? Ties (overlapping ranges) resolve to
+        # the file whose range starts earliest, for determinism.
+        contained = sorted(
+            (first_ts, candidate)
+            for first_ts, last_ts, _filename_ts, candidate in index
+            if first_ts <= ecg_ts <= last_ts
+        )
+        if contained:
+            best_path = contained[0][1]
+            best_offset = 0
+            match_method = "interval_containment"
+        else:
+            # Fallback: original nearest-filename-timestamp rule, for ECGs
+            # that fall in a gap between two vitals files' ranges.
+            for _first_ts, _last_ts, filename_ts, candidate in index:
+                if filename_ts is None:
+                    continue
+                offset = abs(filename_ts - ecg_ts)
+                if best_offset is None or offset < best_offset:
+                    best_offset, best_path = offset, candidate
+            if best_path is not None and best_offset <= max_offset_ms:
+                match_method = "nearest_filename_fallback"
+
+    vitals_path = best_path if match_method is not None else None
 
     not_available_bp_note = "VitalPatch has no BP sensor"
     not_available_spo2 = {"value": None, "source": "not_available", "real": False,
@@ -221,6 +312,7 @@ def load_real_vitals(ecg_path: str, vitals_root: str,
             "vitals_file": attempted,
             "vitals_file_found": False,
             "vitals_time_offset_ms": best_offset,
+            "vitals_match_method": None,
         }
 
     hr = _numeric_stat_dict(_extract_numeric_column(vitals_path, 1, 20, 300),
@@ -263,6 +355,7 @@ def load_real_vitals(ecg_path: str, vitals_root: str,
         "vitals_file": str(vitals_path),
         "vitals_file_found": True,
         "vitals_time_offset_ms": best_offset,
+        "vitals_match_method": match_method,
     }
 
 

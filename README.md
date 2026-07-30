@@ -24,7 +24,7 @@ Classifier training/eval handover history: [`Docs/project_doc.md`](Docs/project_
 
 ## Repository structure
 
-*Verified against the working tree, 2026-07-29.*
+*Verified against the working tree, 2026-07-30.*
 
 ```
 run_inference.py             single CLI entry point for ECG-only inference
@@ -52,6 +52,8 @@ ecg_pipeline/                DEVELOPMENT pipeline: same logic as ecg_inference/,
   manifest_summary.py           combines both batch manifests, prints summary + showcase reports
   demo_stream.py, report_ui.py, synthetic_ecg.py, test_pipeline_synthetic.py
                                  demo/replay UI and a synthetic-ground-truth self-test suite
+  verify_vitals_pairing.py      measures real vitals-ECG pairing coverage against all files on
+                                 disk -- how Task 1's fix (interval containment) was verified
   README.md, DEMO_UI_README.md  code-level guide and demo-UI guide
   models/                       production model only (five_class_xgb.json + .classes.json)
   example_reports/              8 saved JSON reports (7 WFDB + 1 VitalPatch)
@@ -67,8 +69,10 @@ training/                    TRAINING-ONLY: never imported by ecg_inference/ or 
                                  Docs/archive/ABLATION_REPORT.md, not in this repo.
   _original_stages/              pre-consolidation per-stage source files, kept for diffing only
 
-Docs/                        documentation (10 tracked files)
+Docs/                        documentation (16 tracked files)
   PIPELINE_METHODS_AND_RESULTS.md  ** the authoritative methods + measured results reference **
+  HANDOFF.md                     teammate handoff -- what's done, broken, and the task order
+                                 (source of truth for the 2026-07-30 session below)
   AGENT_RULES.md                standing research-integrity rules -- read before touching the
                                  classifier or training code
   DATASETS.md                    every dataset used, where it lives, what it's for
@@ -80,6 +84,12 @@ Docs/                        documentation (10 tracked files)
   EDGE_DEPLOYMENT_FIX_REPORT.md  P1-P4 deployment-blocker fixes
   inference_ready.md             the ecg_inference/ packaging pass and equivalence proof
   project_doc.md                 classifier training/eval handover doc
+  CLINICIAN_REVIEW_INSTRUCTIONS.md  how to review the 50-segment CRITICAL sample (Task 5)
+  NEWS2_PARTIAL_COVERAGE_DECISION.md  options for the NEWS2 3/6-coverage escalation policy --
+                                 not decided, a clinical call (item 8 above)
+  TODAY_IMPROVEMENTS_REPORT.md   2026-07-30 session: before/after table, PASS/FAIL/BLOCKED per
+                                 task, production-readiness assessment
+  SESSION_LOG_TODAY.md           2026-07-30 session: commits, blockers, git state, next task
   archive/                       GITIGNORED, local only -- full ablation history
                                  (ABLATION_REPORT.md) and open research items
                                  (RESEARCH_AUDIT.md). Cited throughout this file; not
@@ -394,9 +404,20 @@ measurement that justifies it.
 3. ~~Re-run the ECG-only batch to refresh the manifest.~~ **DONE**. 3,628
    segments, 0 parse errors, 79.6% assessable (was 78.3%).
 
+4. ~~Select vitals rows near the ECG timestamp instead of averaging the whole
+   file.~~ **DONE**, commit `8286455`. `±2 min` window around the ECG
+   timestamp, falling back to whole-file only if the window is empty. Example:
+   one real segment's HR average narrowed from 81.9 (n=300, whole file) to
+   80.2 (n=42, windowed).
+
+5. ~~Repo hygiene — fix `git gc` refusing to run.~~ **DONE**, 2026-07-30. Root
+   cause was 10,020 old, unreferenced `git stash` loose objects (confirmed via
+   empty `git stash list` before pruning); `git prune` + `git gc` resolved it,
+   `.git/gc.log` is gone, `git fsck --full` is clean.
+
 ### Blocking — needs someone other than this session
 
-4. **Push the `MedGemma-Agent` submodule commits upstream.** `37f4432`,
+6. **Push the `MedGemma-Agent` submodule commits upstream.** `37f4432`,
    `1f36dda` and `087f261` exist only on a local `dev` branch, so the submodule
    pointer recorded here cannot be resolved by a fresh clone. Needs coordination
    with the submodule's owner — it is a separate repository. Not attempted this
@@ -404,27 +425,16 @@ measurement that justifies it.
 
 ### High value — quantifies risk that engineering alone cannot resolve
 
-5. **Get clinician adjudication on a sample of the 290 CRITICAL segments.** This
+7. **Get clinician adjudication on a sample of the 290 CRITICAL segments.** This
    is the largest unquantified risk in the system. 10.0% of assessable segments
    returning CRITICAL is high for a recovering post-op cohort, V-class precision
    is 0.754 (~1 in 4 ventricular calls wrong), and PVC burden drives both
    CRITICAL rules — but there is no ground truth on this corpus, so the rate
    cannot be shown to be either signal or noise from inside the pipeline. A
    stratified sample of 50 segments is prepared at
-   `data/reports/clinician_review_sample.csv` (not yet reviewed). Alert burden,
+   `data/reports/clinician_review_sample.csv` (see
+   `Docs/CLINICIAN_REVIEW_INSTRUCTIONS.md`; not yet reviewed). Alert burden,
    deployment readiness, and threshold tuning all depend on the answer.
-
-### Improvements — real gains, none blocking
-
-6. **Select vitals *rows* near the ECG timestamp** rather than aggregating the
-   whole file. Each vitals file spans ~20 minutes; a single averaged HR/RR/Temp
-   over that window is coarser than the data supports, and coarser than NEWS2
-   assumes. Naturally follows from item 1.
-
-7. **Sweep the AFib rule's `window=20`.** Only the threshold was ever swept
-   (against LTAFDB, 449,749 windows). Window size remains an open validation
-   question and the same harness can answer it. **Do not attempt without
-   sign-off** — untested statistical claims territory (see `Docs/HANDOFF.md`).
 
 8. **Decide what the NEWS2 override should do on 3/6 coverage.** Corrected
    2026-07-30: the earlier claim that NEWS2 ≥ 7 is "arithmetically unreachable"
@@ -432,22 +442,25 @@ measurement that justifies it.
    possible 8, and one real segment (of 3,632) measured exactly 7. It is rare,
    not impossible. The remaining question — whether a rare-but-real ≥7
    escalation on 3/6 coverage is clinically sound to act on — is a clinical
-   safety decision, not an engineering one; options are written up in
-   `Docs/NEWS2_PARTIAL_COVERAGE_DECISION.md`, not decided here. *Note: the
-   qSOFA ≥2 override works and drove all 52 real escalations measured in the
-   full batch.*
+   safety decision, not an engineering one; four options are written up in
+   `Docs/NEWS2_PARTIAL_COVERAGE_DECISION.md` (the write-up is done, the
+   decision itself is not). *Note: the qSOFA ≥2 override works and drove all
+   52 real escalations measured in the full batch.*
 
-9. **Calibrate the confidence tiers.** They are currently a heuristic; no
-   conformal calibration set is loaded by default. `ConformalConfig` already
-   exists in `ecg_pipeline_core.py` but is unused in the default path.
+### Improvements — real gains, none blocking
 
-10. **Add a consciousness/AVPU input path** to reach 4 of 6 NEWS2 components.
+9. **Sweep the AFib rule's `window=20`.** Only the threshold was ever swept
+   (against LTAFDB, 449,749 windows). Window size remains an open validation
+   question and the same harness can answer it. **Do not attempt without
+   sign-off** — untested statistical claims territory (see `Docs/HANDOFF.md`).
+
+10. **Calibrate the confidence tiers.** They are currently a heuristic; no
+    conformal calibration set is loaded by default. `ConformalConfig` already
+    exists in `ecg_pipeline_core.py` but is unused in the default path.
+
+11. **Add a consciousness/AVPU input path** to reach 4 of 6 NEWS2 components.
     This is the only remaining component obtainable without new hardware — SpO2
     and BP require sensors VitalPatch does not have.
-
-11. **Repo hygiene.** `git gc` currently reports too many unreachable loose
-    objects and refuses to run automatically; `.git/gc.log` needs clearing after
-    the root cause is addressed.
 
 ### Explicitly not to be re-attempted
 

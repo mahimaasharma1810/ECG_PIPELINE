@@ -251,24 +251,49 @@ precomputes NEWS2 and `risk_scorer` does `state.get("news2") or calculate_news2(
 — a Pydantic instance is always truthy, so the risk scorer's own call never runs.
 Full detail in `Docs/PIPELINE_METHODS_AND_RESULTS.md` §7.3.
 
-### 5. End-to-end multimodal push — validated on 14 segments
+### 5. End-to-end multimodal push — full batch complete 2026-07-30
 
-*Source: `data/reports/multimodal_batch/sample14_manifest_preserved.json`
-(gitignored, local only).*
+*Source: `data/reports/multimodal_batch/multimodal_manifest.json` (gitignored,
+local only), produced by `python ecg_pipeline/multimodal_batch.py`, elapsed
+2800.6s (~46.7 min). Supersedes the earlier 14-segment plumbing check
+(`sample14_manifest_preserved.json`) and the small-scale 25-segment check
+(`sample25_manifest_smallcheck.json`) done immediately before this run.*
 
 | Metric | Result |
 |---|---|
-| Segments | 14 (2–3 per patient, all 6 patients) |
-| `agent_push_status: SUCCESS` | **14 / 14** |
-| Vitals file found | 14 / 14 |
-| NEWS2 coverage 3/6 | 6 / 14 |
-| NEWS2 coverage 2/6 | 5 / 14 |
-| NEWS2 coverage 1/6 | 3 / 14 |
-| Risk level changed by vitals | 0 / 14 |
+| Segments | 3,632 (all 6 patients) |
+| `agent_push_status: SUCCESS` | 3,619 / 3,632 (99.6%) |
+| `agent_push_status: SKIPPED_MISSING_REQUIRED_FIELDS` | 13 / 3,632 — all 13 have a matched vitals file but no valid HR reading in it (`hr: None`, correctly, not defaulted) |
+| Vitals file found | **3,632 / 3,632 (100.0%)** |
+| Assessable (ECG-only) | 2,891 / 3,632 (79.6%) |
+| NEWS2 coverage 3/6 | 3,301 / 3,632 |
+| NEWS2 coverage 2/6 | 286 / 3,632 |
+| NEWS2 coverage 1/6 | 32 / 3,632 |
+| **Risk level changed by vitals (`combined_risk != ecg_only_risk`)** | **52 / 3,632 (1.43%)** |
 
-**This confirms the pipeline works end-to-end.** It is a plumbing validation, not
-a clinical result — see the next section for why the 0/14 figure must not be read
-as evidence about vitals' clinical value.
+**All 52 changes were escalations (LOW/MEDIUM → HIGH/CRITICAL), never
+downgrades** — consistent with the design rule that vitals can only push risk
+up. All 52 were triggered by qSOFA reaching 2 (both the HR and RR flags true
+simultaneously). One of those 52 segments (`Patch_184635`,
+`1780050938536_..._seg0`) also independently reached **NEWS2 = 7** (HR score 3
++ RR score 3 + Temp score 1, from real HR 150.3 bpm, RR 26.7/min, Temp 38.3°C)
+— **this corrects a prior assumption in this project** (see "Known and
+unfixed" and `Docs/NEWS2_PARTIAL_COVERAGE_DECISION.md`): NEWS2 ≥ 7 is not
+arithmetically unreachable with only 3 components (HR max 3 + RR max 3 + Temp
+max 2 = 8, so 7 is reachable), it is just rare — 1 real segment out of 3,632
+reached it.
+
+**Relationship between NEWS2 score and ECG-only risk level:** mean
+agent-returned NEWS2 score by ECG-only risk level (all real, from the same
+manifest): LOW 1.05 (n=2,051), MEDIUM 0.93 (n=205), HIGH 1.07 (n=1,066),
+CRITICAL 0.69 (n=297). **No visible monotonic relationship** — this is a
+directly measured null result, not an absence of testing.
+
+**This confirms the pipeline works end-to-end at full scale, with the vitals
+integration now doing something measurable** (52 real escalations) — a
+material change from the earlier 0/14 plumbing-only result. It is still not a
+clinical validation: no ground truth exists to say whether any of these 52
+escalations, or the 290 CRITICAL calls overall, are correct.
 
 ---
 
@@ -287,14 +312,15 @@ Listed explicitly so nobody builds on a number that isn't settled.
   vitals-file boundary, since files chain together almost back-to-back. Was
   60.3% before the fix. See commit `709e225`.
 
-- **The full 6-patient multimodal batch has NOT completed.** The only attempt
-  (SLURM job 2660129) was killed by a wall-clock time limit before finishing the
-  first patient. **No override, escalation, or risk-change statistics exist from
-  a completed run**, and none should be reported as fact. The 14-segment sample
-  above is the only multimodal data on disk. Note also that at 3/6 NEWS2
-  coverage the NEWS2 ≥ 7 CRITICAL override is arithmetically unreachable, so
-  "vitals changed nothing" cannot currently distinguish "vitals don't matter"
-  from "the override can't fire."
+- **The full 6-patient multimodal batch — COMPLETE 2026-07-30.** An earlier
+  attempt (SLURM job 2660129) was killed by a wall-clock limit before finishing
+  the first patient; this session's run (job 2660558's allocation) completed
+  all 3,632 segments in 2800.6s with 0 errors. See §5 above for the real
+  measured results: 52/3,632 (1.43%) segments had their risk level changed by
+  vitals, all escalations. The claim that NEWS2 ≥ 7 is "arithmetically
+  unreachable" at 3/6 coverage was wrong — HR(max 3) + RR(max 3) + Temp(max 2)
+  sums to a possible 8, and one real segment measured exactly 7. It is rare,
+  not impossible: 1 segment out of 3,632.
 
 - **S class (F1 0.139) and F class (F1 0.011) — closed research problem.** Four
   genuinely different approaches were tried and all failed identically: extra
@@ -314,7 +340,9 @@ Listed explicitly so nobody builds on a number that isn't settled.
   ground truth exists for this corpus, and V-class precision is 0.754 — roughly
   1 in 4 ventricular calls is wrong, and PVC burden drives both CRITICAL rules.
   Clinician adjudication of a sample is the only way to settle whether this rate
-  is signal or false-positive noise.
+  is signal or false-positive noise. A 50-segment stratified sample is prepared
+  at `data/reports/clinician_review_sample.csv` (see
+  `Docs/CLINICIAN_REVIEW_INSTRUCTIONS.md`); no clinician has reviewed it yet.
 
 - **The ECG-only batch manifest was regenerated 2026-07-30** after the parser
   fix (`ecg_pipeline_core.py:292-307`, coerce-to-NaN with pairwise drop). Re-run
@@ -353,48 +381,38 @@ Listed explicitly so nobody builds on a number that isn't settled.
 Ordered by evidence strength and value, not by effort. Each item names the
 measurement that justifies it.
 
-### Blocking — do these before quoting any new multimodal number
+### Done as of 2026-07-30 (were previously blocking)
 
-1. **Fix the vitals-pairing rule.** Replace nearest-filename-timestamp (±30 s)
-   with interval containment against each vitals file's internal first/last row
-   timestamps, keeping nearest-within-30 s as a fallback for ECGs that fall in
-   gaps between files. *Measured payoff: 60.3% → 95.3% coverage, +831 segments.*
-   Two patients (Patch_1844AC, Patch_1849DF) go from 15.2%/18.1% to 100%. This is
-   a heuristic bug, not a data limitation, and it is contained to
-   `load_real_vitals()` in `ecg_pipeline/agent_bridge.py`. Running the full batch
-   before this fix bakes a pairing artifact into the headline coverage figure.
+1. ~~Fix the vitals-pairing rule.~~ **DONE**, commit `709e225`. Interval
+   containment + 30s fallback. Measured coverage: 60.3% → **100.0%**
+   (2,375/2,375 real ECG files).
 
-2. **Complete the full 6-patient multimodal batch.** The only attempt was killed
-   by a SLURM wall-clock limit. Requires: an allocation longer than the run, the
-   `MedGemma-Agent` service restarted on the allocated node, and item 1 done
-   first. *Runtime estimate: the 14-segment sample took 15.5 s including 14 live
-   Agent round-trips (~1.1 s/segment), extrapolating to ~65 min for ~3,628
-   segments — `[UNVERIFIED at scale]`, Agent latency has not been measured under
-   sustained load.* Until this completes, no override or risk-change statistic
-   exists to report.
+2. ~~Complete the full 6-patient multimodal batch.~~ **DONE**, 2026-07-30.
+   3,632 segments, 0 errors, 2800.6s. 52/3,632 (1.43%) segments had their risk
+   level changed by vitals (all escalations). See §5 above.
 
-3. **Push the `MedGemma-Agent` submodule commits upstream.** `37f4432`,
+3. ~~Re-run the ECG-only batch to refresh the manifest.~~ **DONE**. 3,628
+   segments, 0 parse errors, 79.6% assessable (was 78.3%).
+
+### Blocking — needs someone other than this session
+
+4. **Push the `MedGemma-Agent` submodule commits upstream.** `37f4432`,
    `1f36dda` and `087f261` exist only on a local `dev` branch, so the submodule
    pointer recorded here cannot be resolved by a fresh clone. Needs coordination
-   with the submodule's owner — it is a separate repository.
+   with the submodule's owner — it is a separate repository. Not attempted this
+   session; see `Docs/SESSION_LOG_TODAY.md`.
 
 ### High value — quantifies risk that engineering alone cannot resolve
 
-4. **Get clinician adjudication on a sample of the 290 CRITICAL segments.** This
+5. **Get clinician adjudication on a sample of the 290 CRITICAL segments.** This
    is the largest unquantified risk in the system. 10.0% of assessable segments
    returning CRITICAL is high for a recovering post-op cohort, V-class precision
    is 0.754 (~1 in 4 ventricular calls wrong), and PVC burden drives both
    CRITICAL rules — but there is no ground truth on this corpus, so the rate
    cannot be shown to be either signal or noise from inside the pipeline. A
-   stratified sample of ~50 segments would bound it. Alert burden, deployment
-   readiness, and threshold tuning all depend on the answer.
-
-5. **Re-run the ECG-only batch to refresh the manifest.** The parser fix for the
-   `-` sentinel already landed and recovers all 70 previously-lost segments
-   (verified: 2,375/2,375 files parse, 0 errors, 27 s), but
-   `data/reports/vitalpatch_run_manifest.csv` still holds the pre-fix run, so
-   every headline ECG-only number is computed from a manifest missing 2.0% of the
-   corpus. Cheap to fix and it makes the numbers final.
+   stratified sample of 50 segments is prepared at
+   `data/reports/clinician_review_sample.csv` (not yet reviewed). Alert burden,
+   deployment readiness, and threshold tuning all depend on the answer.
 
 ### Improvements — real gains, none blocking
 
@@ -405,16 +423,19 @@ measurement that justifies it.
 
 7. **Sweep the AFib rule's `window=20`.** Only the threshold was ever swept
    (against LTAFDB, 449,749 windows). Window size remains an open validation
-   question and the same harness can answer it.
+   question and the same harness can answer it. **Do not attempt without
+   sign-off** — untested statistical claims territory (see `Docs/HANDOFF.md`).
 
-8. **Decide what the NEWS2 override should do on 3/6 coverage.** At three
-   components the maximum attainable NEWS2 is far below the ≥7 CRITICAL
-   threshold, so the override is arithmetically unreachable on VitalPatch
-   hardware — it is currently dead code on this device. Either adopt a documented
-   device-specific threshold, or state explicitly that the override is inactive
-   for this hardware. Silently shipping an override that cannot fire is the worst
-   of the three options. *Note: the qSOFA ≥2 override is not affected — it
-   reached 2 in 1 of the 14 sampled segments and works.*
+8. **Decide what the NEWS2 override should do on 3/6 coverage.** Corrected
+   2026-07-30: the earlier claim that NEWS2 ≥ 7 is "arithmetically unreachable"
+   at 3/6 coverage was wrong — HR(max 3) + RR(max 3) + Temp(max 2) sums to a
+   possible 8, and one real segment (of 3,632) measured exactly 7. It is rare,
+   not impossible. The remaining question — whether a rare-but-real ≥7
+   escalation on 3/6 coverage is clinically sound to act on — is a clinical
+   safety decision, not an engineering one; options are written up in
+   `Docs/NEWS2_PARTIAL_COVERAGE_DECISION.md`, not decided here. *Note: the
+   qSOFA ≥2 override works and drove all 52 real escalations measured in the
+   full batch.*
 
 9. **Calibrate the confidence tiers.** They are currently a heuristic; no
    conformal calibration set is loaded by default. `ConformalConfig` already

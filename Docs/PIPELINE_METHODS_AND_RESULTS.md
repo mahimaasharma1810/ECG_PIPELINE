@@ -314,7 +314,9 @@ independently validated** — there is no ground truth on this corpus. It is at
 least as likely to reflect classifier false positives on noisy single-lead data
 (V-class precision is 0.754, so ~1 in 4 V calls is wrong, and PVC burden drives
 the two CRITICAL rules) as it is to reflect real events. `[UNVERIFIED — requires
-clinician adjudication of a sample]`
+clinician adjudication of a sample]` A 50-segment stratified sample is now
+prepared at `data/reports/clinician_review_sample.csv` (see
+`Docs/CLINICIAN_REVIEW_INSTRUCTIONS.md`); no clinician has reviewed it yet.
 
 ### 6.2 SeNSiO/prorhythm — complete, 18 recordings
 

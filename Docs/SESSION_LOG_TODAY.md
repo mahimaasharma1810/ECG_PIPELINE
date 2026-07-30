@@ -15,6 +15,7 @@ commits, blockers, and git state.
 | `9c72aec` | docs: record completed multimodal batch and prepared clinician review sample | 3, 5 |
 | `8286455` | perf: use vitals rows nearest the ECG timestamp, not the whole 20-min file | 6 (item 6) |
 | `a9dec88` | docs: write up NEWS2 partial-coverage escalation decision, options only | 6 (item 8) |
+| `b97087a` | docs: add today's improvement comparison report and session log | deliverable |
 
 Item 11 (git gc root-cause fix) involved no file changes to this repo — it
 was repository-object maintenance (`git prune` + `git gc`), not tracked
@@ -22,9 +23,9 @@ content, so there is no commit for it. Details below under "Git repository
 maintenance."
 
 `mod_1` was already 2 commits ahead of `origin/mod_1` at the start of this
-session (`5eb160e`, `8ecc9c8`, from a prior session). It is now **7 commits
-ahead of `origin/mod_1`**. Nothing was pushed today — see "What was NOT
-pushed" below.
+session (`5eb160e`, `8ecc9c8`, from a prior session). It is now **8 commits
+ahead of `origin/mod_1`** (`git log --oneline origin/mod_1..HEAD`). Nothing
+was pushed today — see "What was NOT pushed" below.
 
 ## Every blocker hit and how it was handled
 
@@ -89,7 +90,7 @@ limit) had enough remaining wall-clock time for the full multimodal batch
 
 ```
 On branch mod_1
-Your branch is ahead of 'origin/mod_1' by 7 commits.
+Your branch is ahead of 'origin/mod_1' by 8 commits.
 Changes not staged for commit:
 	modified:   MedGemma-Agent (modified content, untracked content)
 ```
@@ -99,13 +100,13 @@ pre-existing uncommitted changes (see blocker 3 above) — this session did not
 create or add to that; it was already this way at the start of the session
 (confirmed against the pre-session `git status` in the conversation record).
 
-**What was NOT pushed, and why:** all 7 unpushed local commits on `mod_1`
-(5 from today, 2 from before) are left committed locally only. Per
-instructions, pushing requires explicit confirmation and a clear statement of
-what's being pushed and why — neither was requested for this session, so
-nothing was pushed. If/when a push is wanted, `git push origin mod_1` would
-publish exactly the 7 commits listed via `git log --oneline
-origin/mod_1..HEAD`.
+**What was NOT pushed, and why:** all 8 unpushed local commits on `mod_1`
+(6 from today, including this log itself, plus 2 from before) are left
+committed locally only. Per instructions, pushing requires explicit
+confirmation and a clear statement of what's being pushed and why — neither
+was requested for this session, so nothing was pushed. If/when a push is
+wanted, `git push origin mod_1` would publish exactly the 8 commits listed via
+`git log --oneline origin/mod_1..HEAD`.
 
 **The `MedGemma-Agent` submodule was not pushed, force-pushed, or committed
 to** at any point this session, consistent with the standing rule that it is

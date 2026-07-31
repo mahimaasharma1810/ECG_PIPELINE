@@ -229,16 +229,25 @@ rows — see prior "Known and unfixed" entry, now resolved); aggregated in
 | NOT_ASSESSABLE | 739 (20.4%) |
 | Parse errors | 0 |
 
-Risk distribution: LOW 1,881 (51.8%) · MEDIUM 166 (4.6%) · HIGH 552 (15.2%) ·
-CRITICAL 290 (8.0%) · NOT_ASSESSABLE 739 (20.4%). CRITICAL is 10.0% of
-assessable segments (290/2,889).
+Risk distribution (as originally run, **pre-R-peak-fix — see update below**):
+LOW 1,881 (51.8%) · MEDIUM 166 (4.6%) · HIGH 552 (15.2%) · CRITICAL 290 (8.0%)
+· NOT_ASSESSABLE 739 (20.4%). CRITICAL was 10.0% of assessable segments
+(290/2,889).
+
+**Updated 2026-07-31:** this CRITICAL rate was substantially inflated by an
+R-peak over-detection bug (XQRS misreading T-waves as extra beats — see
+`Docs/AUDIT_2026-07-31.md` §7). Re-scoring all 2,889 assessable segments with
+the fix applied gives **CRITICAL 15/2,889 (0.5%)**, LOW 1,714, MEDIUM 141,
+HIGH 979, NOT_ASSESSABLE 40. The 290-segment / 10.0% figures above describe
+the *original, buggy* run and are kept for historical context, not as the
+current number — do not cite 290 or 10.0% as current.
 
 **79.6% assessability on real, uncontrolled, at-home wearable data is the
 current headline ECG-only result**, up from a previously-reported 78.3%
 computed on a stale, pre-parser-fix manifest (70 of 3,570 rows were
 `PARSE_ERROR`; re-parsing added 128 net segments with 0 failures). The
-10.0%-of-assessable CRITICAL rate is reported as observed, not endorsed — see
-"Known and unfixed" below.
+0.5%-of-assessable CRITICAL rate (post R-peak-fix) is reported as observed,
+not endorsed — see "Known and unfixed" below.
 
 A second device batch (SeNSiO/prorhythm, `data/reports/prorhythm_run_manifest.csv`)
 is complete at 18 recordings, 13 assessable. Too small for rate estimates; useful
@@ -303,7 +312,8 @@ directly measured null result, not an absence of testing.
 integration now doing something measurable** (52 real escalations) — a
 material change from the earlier 0/14 plumbing-only result. It is still not a
 clinical validation: no ground truth exists to say whether any of these 52
-escalations, or the 290 CRITICAL calls overall, are correct.
+escalations, or the CRITICAL calls overall (15 post-R-peak-fix, see §3
+update above), are correct.
 
 ---
 
@@ -346,13 +356,50 @@ Listed explicitly so nobody builds on a number that isn't settled.
   never defaulted to a "normal" value. Only 3 of the 6 NEWS2 components (heart
   rate, respiratory rate, temperature) can be sourced from this device.
 
-- **The 10.0%-of-assessable CRITICAL rate is unvalidated.** `[UNVERIFIED]` No
-  ground truth exists for this corpus, and V-class precision is 0.754 — roughly
-  1 in 4 ventricular calls is wrong, and PVC burden drives both CRITICAL rules.
-  Clinician adjudication of a sample is the only way to settle whether this rate
-  is signal or false-positive noise. A 50-segment stratified sample is prepared
+- **R-peak over-detection inflating the CRITICAL rate — FIXED 2026-07-31.**
+  XQRS was misreading T-waves as extra beats (its own T-wave-rejection check
+  was disabled by default), inflating HR/PVC/AFib burden and feeding directly
+  into the CRITICAL cascade. Fixed by enabling `t_inspect_period` + a
+  refractory-period guard. Corrected the CRITICAL rate from 290/2,889 (10.0%)
+  to **15/2,889 (0.5%)**. See `Docs/AUDIT_2026-07-31.md` §7 for full
+  before/after numbers, including a flagged-not-explained 503-segment
+  LOW→HIGH transition that needs its own review.
+
+- **The 0.5%-of-assessable CRITICAL rate (post R-peak-fix) is still
+  unvalidated.** `[UNVERIFIED]` No ground truth exists for this corpus, and
+  V-class precision is 0.754 — roughly 1 in 4 ventricular calls is wrong, and
+  PVC burden drives both CRITICAL rules. Clinician adjudication is the only
+  way to settle whether this rate is signal or false-positive noise. All 15
+  post-fix CRITICAL segments (not a sample — there are only 15) are prepared
   at `data/reports/clinician_review_sample.csv` (see
   `Docs/CLINICIAN_REVIEW_INSTRUCTIONS.md`); no clinician has reviewed it yet.
+
+- **SDNN's "not enough data" case was silently sentinel-valued as 0.0 —
+  FIXED in `ecg_pipeline_core.py` / `agent_bridge.py`, 2026-07-31, NOT yet
+  mirrored to `ecg_inference/` — open bug in the deployment path.**
+  `recording_level_hrv()` returned `sdnn_ms: 0.0` when fewer than 3 valid RR
+  intervals were available, and `0.0 < 20.0` (the HRV-suppressed threshold)
+  is always true — every low-data segment was silently scored **MEDIUM
+  ("Sustained HRV suppression")**, a real risk-level distortion, not a
+  cosmetic one. `ecg_pipeline_core.py`/`agent_bridge.py` now treat this case
+  as `None` ("not evaluated"), never as a value that satisfies the threshold.
+  **`ecg_inference/features.py` and `ecg_inference/classifier.py` (the
+  package `run_inference.py` actually uses) still have the old 0.0-sentinel
+  bug** — this breaks the dev/inference equivalence documented in
+  `Docs/inference_ready.md` and needs porting before the next equivalence
+  check. See `Docs/AUDIT_2026-07-31.md` §8.1.
+
+- **Waveform PNGs in clinician reports were unreadable — FIXED 2026-07-31,
+  display-only.** The report's waveform reconstruction ran the full filter
+  chain including the final Kalman EMG-suppression step, whose fixed
+  noise-variance constants assume a signal ~2-3 orders of magnitude smaller
+  than VitalPatch's raw ADC-count scale — at that scale the filter smeared
+  every QRS into a decaying blob (measured: peak-to-peak amplitude dropped
+  ~12x on a real segment). Fixed by skipping that one step for display only
+  (`skip_emg_suppress=True`), mirroring what R-peak *detection* already does.
+  Beat classification, rhythm findings, and the risk decision are unaffected
+  — they come from the pipeline's own frozen output, not this display
+  reconstruction. See `Docs/AUDIT_2026-07-31.md` §8.2.
 
 - **The ECG-only batch manifest was regenerated 2026-07-30** after the parser
   fix (`ecg_pipeline_core.py:292-307`, coerce-to-NaN with pairwise drop). Re-run
@@ -425,13 +472,14 @@ measurement that justifies it.
 
 ### High value — quantifies risk that engineering alone cannot resolve
 
-7. **Get clinician adjudication on a sample of the 290 CRITICAL segments.** This
-   is the largest unquantified risk in the system. 10.0% of assessable segments
-   returning CRITICAL is high for a recovering post-op cohort, V-class precision
-   is 0.754 (~1 in 4 ventricular calls wrong), and PVC burden drives both
-   CRITICAL rules — but there is no ground truth on this corpus, so the rate
-   cannot be shown to be either signal or noise from inside the pipeline. A
-   stratified sample of 50 segments is prepared at
+7. **Get clinician adjudication on the 15 post-fix CRITICAL segments.** This
+   is the largest unquantified risk in the system. The R-peak over-detection
+   fix (`Docs/AUDIT_2026-07-31.md` §7) corrected the CRITICAL count from 290
+   to 15 (0.5% of assessable), but V-class precision is still 0.754 (~1 in 4
+   ventricular calls wrong) and PVC burden still drives both CRITICAL rules —
+   there is no ground truth on this corpus, so even the corrected rate cannot
+   be shown to be signal or noise from inside the pipeline. All 15 segments
+   (not a sample — that's all there are post-fix) are prepared at
    `data/reports/clinician_review_sample.csv` (see
    `Docs/CLINICIAN_REVIEW_INSTRUCTIONS.md`; not yet reviewed). Alert burden,
    deployment readiness, and threshold tuning all depend on the answer.
@@ -461,6 +509,19 @@ measurement that justifies it.
 11. **Add a consciousness/AVPU input path** to reach 4 of 6 NEWS2 components.
     This is the only remaining component obtainable without new hardware — SpO2
     and BP require sensors VitalPatch does not have.
+
+### Bugs to fix
+
+12. **Port the SDNN None-fix to `ecg_inference/`.** `ecg_pipeline_core.py` and
+    `ecg_pipeline/agent_bridge.py` were fixed 2026-07-31 so a segment with
+    fewer than 3 valid RR intervals reports SDNN as "not evaluated" instead of
+    a sentinel `0.0` that always satisfies the HRV-suppressed threshold check
+    (`0.0 < 20.0`) and silently forces MEDIUM. **`ecg_inference/features.py`
+    and `ecg_inference/classifier.py` — the actual deployment package
+    `run_inference.py` uses — were not updated** and still have the old bug.
+    This breaks the dev/inference equivalence `Docs/inference_ready.md`
+    otherwise documents. See `Docs/AUDIT_2026-07-31.md` §8.1 for the full
+    writeup and exact lines to mirror.
 
 ### Explicitly not to be re-attempted
 

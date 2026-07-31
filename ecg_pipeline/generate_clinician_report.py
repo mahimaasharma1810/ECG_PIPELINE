@@ -227,11 +227,30 @@ def build_drift_banner(saved: dict, fresh: dict) -> list[str]:
 
 
 def recompute_filtered_signal(recording) -> tuple[np.ndarray, np.ndarray]:
-    """Re-derives the filtered/resampled signal (stages 2-4) exactly as
-    ECGPipeline.run() does internally -- deterministic signal processing, no
-    classifier involved, needed only because PipelineResult does not expose
-    this intermediate array. Returns (filtered, t_resampled_ms). Empty
-    arrays if nothing survives the quality gate."""
+    """Re-derives a DISPLAY-ONLY version of the filtered/resampled signal
+    (stages 2-4, skipping the final Kalman EMG-suppression step) --
+    deterministic signal processing, no classifier involved, needed only
+    because PipelineResult does not expose this intermediate array. Returns
+    (filtered, t_resampled_ms). Empty arrays if nothing survives the quality
+    gate.
+
+    WHY THE KALMAN STEP IS SKIPPED HERE (display only -- never for
+    classification/decisions): emg_suppress_kalman's fixed absolute
+    variances (process_var/meas_var, see ecg_pipeline_core.py) assume a
+    small-mV-scale signal. VitalPatch's raw signal is uncalibrated ADC
+    counts, 2-3 orders of magnitude larger in amplitude -- at that scale the
+    filter's gain collapses and it smears every QRS into a decaying blob
+    instead of tracking it (verified: peak-to-peak amplitude on a real
+    segment dropped ~12x, from ~1420 to ~120, after this one step). This
+    array is used ONLY to draw the waveform panels and to read off each
+    beat's y-coordinate for the R-peak/classification markers -- it never
+    feeds beat windowing, feature extraction, or the classifier (those come
+    from `result`/`saved`, computed separately by the frozen pipeline, and
+    are byte-identical whether or not this function skips Kalman). This
+    mirrors a choice the pipeline already makes elsewhere: R-peak DETECTION
+    also runs on a Kalman-skipped signal (see detect_and_segment), while
+    only feature extraction uses the full Kalman'd output -- see
+    emg_suppress_kalman's docstring for why that one can't be changed."""
     keep_mask, _ = run_sqi_gate(recording.signal_mv, recording.timestamps_ms,
                                  recording.fs_nominal, clip_value=None)
     signal_clean = recording.signal_mv.copy()
@@ -244,7 +263,8 @@ def recompute_filtered_signal(recording) -> tuple[np.ndarray, np.ndarray]:
         return np.array([]), np.array([])
     resampled_filled = np.interp(t_resampled, t_resampled[valid], resampled[valid])
     filtered = apply_filter_chain(resampled_filled, TARGET_FS,
-                                   already_bandpass_filtered=recording.already_bandpass_filtered)
+                                   already_bandpass_filtered=recording.already_bandpass_filtered,
+                                   skip_emg_suppress=True)
     return filtered, t_resampled
 
 
@@ -898,6 +918,13 @@ def _panel_appendix_metrics_and_diff(ax, saved: dict, raw_diffs: list[str]):
     lines.append("")
     lines.append("Confidence tier shown in this report is a heuristic, not a calibrated "
                   "probability (Docs/README.md, 'Known and unfixed').")
+    lines.append("")
+    lines.append("Waveform panels in this report show a DISPLAY-ONLY reconstruction of the filtered "
+                  "signal that skips the pipeline's final EMG-smoothing (Kalman) step -- that step's "
+                  "fixed noise-variance constants assume a much smaller signal scale than this device "
+                  "produces and otherwise smear every QRS complex into an unreadable blob. This "
+                  "affects plotting only: beat classification, rhythm findings, and the risk decision "
+                  "above are all computed by the pipeline's own frozen output and are unaffected.")
 
     if raw_diffs:
         lines.append("")

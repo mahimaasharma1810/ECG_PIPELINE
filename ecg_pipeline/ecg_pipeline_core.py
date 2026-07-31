@@ -1574,7 +1574,17 @@ def recording_level_hrv(beats: list[Beat]) -> dict:
     the stage 8 risk scorer, not the beat classifier."""
     rr = np.array([b.rr_post_ms for b in beats if b.rr_post_ms is not None and not b.rr_flagged])
     if len(rr) < 3:
-        return {"sdnn_ms": 0.0, "rmssd_ms": 0.0, "pnn50_pct": 0.0, "lf_hf_ratio": 0.0, "qrs_width_trend": 0.0}
+        # sdnn_ms=None (not 0.0): fewer than 3 valid RR intervals means SDNN
+        # is genuinely undefined here, not measured-and-zero. A hardcoded
+        # 0.0 sentinel is indistinguishable downstream from a real
+        # (physiologically implausible) zero-variability reading and would
+        # silently satisfy score_recording()'s "SDNN < threshold" check on
+        # segments with too little data to say anything -- see
+        # score_recording() and agent_bridge._build_rule_trace() for the
+        # None-aware handling this requires. The other fields aren't
+        # threshold-checked anywhere downstream, so they're left as 0.0 to
+        # avoid unrelated risk to callers that assume a float.
+        return {"sdnn_ms": None, "rmssd_ms": 0.0, "pnn50_pct": 0.0, "lf_hf_ratio": 0.0, "qrs_width_trend": 0.0}
 
     sdnn = float(np.std(rr, ddof=1))
     diffs = np.diff(rr)
@@ -2117,7 +2127,10 @@ def score_recording(labels: list[str], findings: list[RhythmFinding], hrv: dict,
     denominator = afib_windows_examined if afib_windows_examined is not None else len(findings)
     afib_burden = 100.0 * len(afib_windows) / max(1, denominator)
     sdnn_ms = hrv.get("sdnn_ms", 0.0)
-    hrv_suppressed = sdnn_ms < thresholds.hrv_sdnn_suppressed_ms
+    # None means recording_level_hrv() didn't have enough valid RR intervals
+    # to compute a real SDNN -- treat as "not evaluated" (rule can't fire),
+    # never as a value that happens to satisfy "< threshold".
+    hrv_suppressed = sdnn_ms is not None and sdnn_ms < thresholds.hrv_sdnn_suppressed_ms
 
     reasons = []
     level = "LOW"

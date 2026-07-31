@@ -5,6 +5,16 @@
 
 ## Why this exists
 
+**Updated 2026-07-31:** the original 290/2889 (10.0%) CRITICAL rate below
+was found to be substantially inflated by an R-peak over-detection bug
+(XQRS misreading T-waves as extra beats) — see `Docs/AUDIT_2026-07-31.md`
+§7 for the full writeup. After the fix, the corrected CRITICAL count is
+**15/2889 (0.5%)**, and `clinician_review_sample.csv` has been
+regenerated to cover all 15 (not a 50-item sample — there aren't 50 to
+draw from anymore). The paragraph below describes the *original*
+methodology and is kept for context; the sample it refers to no longer
+exists as a random subset — it's the full corrected pool.
+
 Of 2,889 assessable ECG segments in the current batch
 (`data/reports/vitalpatch_run_manifest.csv`), 290 (10.0%) came back CRITICAL.
 That is a high rate for a recovering post-op cohort, and there is no ground
@@ -17,12 +27,17 @@ burden drives both CRITICAL rules. Only clinical review can settle this. See
 This is not a diagnostic tool and no output here should be treated as one.
 The system produces decision support, not a diagnosis.
 
-## What is in the sample
+## What is in the sample (post-fix)
 
-`data/reports/clinician_review_sample.csv` is a random sample of 50 of the
-290 CRITICAL segments (seed 42, reproducible), one row per segment, with the
-same columns as the full manifest (`patient_id`, `segment_id`,
-`n_beats_analyzed`, etc.).
+`data/reports/clinician_review_sample.csv` now contains **all 15**
+segments that are CRITICAL after the R-peak fix (out of 2,889 assessable
+segments) — not a random sample, since 15 is already fewer than the
+original 50-segment target. Same columns as the full manifest
+(`patient_id`, `segment_id`, `n_beats_analyzed`, etc.). A backup of the
+original pre-fix 50-segment random sample (seed 42, drawn from the old
+290-segment CRITICAL pool) is not tracked in git (data/ is gitignored)
+but is fully reproducible from `vitalpatch_run_manifest.csv`'s pre-fix
+`final_risk_level` column with the same seed.
 
 For every sampled segment, two report files already exist at:
 

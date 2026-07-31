@@ -696,6 +696,10 @@ def _build_rule_trace(risk_report: RiskReport, audit: AuditLog,
     """
     hrv_payload = _get_audit_payload(audit, "STAGE6_FEATURES") or {}
     sdnn_ms = hrv_payload.get("hrv", {}).get("sdnn_ms", 0.0)
+    # None (see recording_level_hrv()) means too few valid RR intervals to
+    # compute a real SDNN -- show that reason explicitly rather than a bare
+    # number or a value a reviewer could mistake for a measured zero.
+    sdnn_display = round(sdnn_ms, 3) if sdnn_ms is not None else "not evaluated (<3 valid RR intervals)"
 
     trace = [
         {
@@ -735,7 +739,7 @@ def _build_rule_trace(risk_report: RiskReport, audit: AuditLog,
         },
         {
             "condition": "Sustained HRV suppression: SDNN < threshold",
-            "measured_value": round(sdnn_ms, 3),
+            "measured_value": sdnn_display,
             "threshold": thresholds.hrv_sdnn_suppressed_ms,
             "fired": risk_report.hrv_suppressed,
             "would_set_level": "MEDIUM",

@@ -40,11 +40,25 @@ class Beat:
 
 
 def detect_r_peaks(signal: np.ndarray, fs: float) -> np.ndarray:
-    """WFDB XQRS adaptive-threshold R-peak detector."""
+    """WFDB XQRS adaptive-threshold R-peak detector.
+
+    CORRECTION (2026-07-31): XQRS's own T-wave-discrimination check
+    (`_is_twave`, a slope comparison against the previous beat) only ever
+    runs on a candidate peak that falls within `Conf.t_inspect_period` of
+    the last accepted beat -- and that defaults to 0, disabling it
+    entirely. On this device's morphology (a sharp negative QRS
+    immediately followed by an unusually tall/broad T-wave), any peak that
+    clears the 200ms hard refractory period and the amplitude threshold
+    was being accepted as a second, spurious beat regardless of slope.
+    Setting t_inspect_period=0.36 (the conventional Pan-Tompkins-style
+    T-wave-inspection window) enables the existing, designed-for-this-
+    purpose check. Kept in sync with ecg_pipeline_core.detect_r_peaks --
+    see that function's docstring for the full measurement writeup."""
     import wfdb.processing as wp
     if len(signal) < int(fs * 2):
         return np.array([], dtype=int)
-    xqrs = wp.XQRS(sig=signal, fs=fs)
+    conf = wp.XQRS.Conf(t_inspect_period=0.36)
+    xqrs = wp.XQRS(sig=signal, fs=fs, conf=conf)
     xqrs.detect(verbose=False)
     return np.asarray(xqrs.qrs_inds, dtype=int)
 
@@ -197,6 +211,11 @@ def _snap_to_local_peak(signal: np.ndarray, r_peaks: np.ndarray, search_radius: 
     radius=8). 8 samples (~64ms @125Hz) still comfortably covers the
     observed ~3-sample jitter with margin.
     """
+    # A steepness-based tiebreak for near-tied amplitude candidates (e.g. a
+    # negative T-wave close in |amplitude| to the true R-peak) was tried
+    # and measured worse (83.3% vs 90.9% peaks-on-true-QRS across 5
+    # VitalPatch segments against an independent locator) -- reverted, see
+    # ecg_pipeline_core._snap_to_local_peak's docstring for the measurement.
     if len(r_peaks) == 0:
         return r_peaks
     snapped = r_peaks.copy()
@@ -206,6 +225,25 @@ def _snap_to_local_peak(signal: np.ndarray, r_peaks: np.ndarray, search_radius: 
             continue
         snapped[i] = lo + int(np.argmax(np.abs(signal[lo:hi])))
     return snapped
+
+
+def _apply_refractory_guard(signal: np.ndarray, r_peaks: np.ndarray, fs: float,
+                             refractory_s: float = 0.2) -> np.ndarray:
+    """Physiological refractory-period guard, applied after detection + snap.
+    Kept in sync with ecg_pipeline_core._apply_refractory_guard -- see that
+    function's docstring for the full rationale."""
+    if len(r_peaks) < 2:
+        return r_peaks
+    min_gap = int(round(refractory_s * fs))
+    kept = [int(r_peaks[0])]
+    for r in r_peaks[1:]:
+        r = int(r)
+        if r - kept[-1] < min_gap:
+            if abs(float(signal[r])) > abs(float(signal[kept[-1]])):
+                kept[-1] = r
+        else:
+            kept.append(r)
+    return np.asarray(kept, dtype=int)
 
 
 def detect_and_segment(signal: np.ndarray, fs: float, cfg: BeatWindowConfig = BEATS,
@@ -232,6 +270,7 @@ def detect_and_segment(signal: np.ndarray, fs: float, cfg: BeatWindowConfig = BE
     peaks_from = detection_signal if detection_signal is not None else signal
     r_peaks = detect_r_peaks(peaks_from, fs)
     r_peaks = _snap_to_local_peak(signal, r_peaks, search_radius=snap_radius)
+    r_peaks = _apply_refractory_guard(signal, r_peaks, fs)
     return segment_beats(signal, fs, r_peaks, cfg)
 
 

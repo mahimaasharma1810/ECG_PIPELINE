@@ -968,11 +968,28 @@ class Beat:
 
 
 def detect_r_peaks(signal: np.ndarray, fs: float) -> np.ndarray:
-    """WFDB XQRS adaptive-threshold R-peak detector."""
+    """WFDB XQRS adaptive-threshold R-peak detector.
+
+    CORRECTION (2026-07-30): XQRS's own T-wave-discrimination check
+    (`_is_twave`, a slope comparison against the previous beat) only ever
+    runs on a candidate peak that falls within `Conf.t_inspect_period` of
+    the last accepted beat -- and that defaults to 0, disabling it
+    entirely. On this device's morphology (a sharp negative QRS
+    immediately followed by an unusually tall/broad T-wave), any peak that
+    clears the 200ms hard refractory period and the amplitude threshold
+    was being accepted as a second, spurious beat regardless of slope --
+    verified directly: one segment's true beat count (confirmed against
+    the independently-measured vitals HR) was 18, XQRS with defaults
+    reported 36, almost exactly double. Setting t_inspect_period=0.36
+    (the conventional Pan-Tompkins-style T-wave-inspection window)
+    enables the existing, designed-for-this-purpose check; verified on 5
+    segments across 3 different patients that resulting beat counts land
+    within a few percent of vitals HR instead of 1.4-2.2x too high."""
     import wfdb.processing as wp
     if len(signal) < int(fs * 2):
         return np.array([], dtype=int)
-    xqrs = wp.XQRS(sig=signal, fs=fs)
+    conf = wp.XQRS.Conf(t_inspect_period=0.36)
+    xqrs = wp.XQRS(sig=signal, fs=fs, conf=conf)
     xqrs.detect(verbose=False)
     return np.asarray(xqrs.qrs_inds, dtype=int)
 
@@ -1124,6 +1141,21 @@ def _snap_to_local_peak(signal: np.ndarray, r_peaks: np.ndarray, search_radius: 
     (13-record aggregate retention: 81.0% at radius=15 vs 82.9% at
     radius=8). 8 samples (~64ms @125Hz) still comfortably covers the
     observed ~3-sample jitter with margin.
+
+    INVESTIGATED AND REJECTED (2026-07-31): tried disambiguating
+    near-tied local extrema (e.g. a negative T-wave close in |amplitude|
+    to the true positive R-peak -- seen on patient 1844AC, one beat had
+    R=+24.0 vs a T-trough 90ms later at -24.1) by preferring the
+    steeper/narrower candidate within a tie, on the theory that QRS is
+    physiologically sharper than T. Measured against an independent
+    slope-threshold QRS locator (not XQRS, not this function) across the
+    same 5 VitalPatch segments: plain argmax(abs(...)) (this function,
+    unchanged) scored 90.9% peaks landing on the true QRS vs the
+    steepness-tiebreak variant's 83.3% -- the tiebreak regressed 3 of 5
+    segments, including one from 100% to 78% correct. Reverted; plain
+    amplitude argmax is the measured-better choice here, isolated
+    per-beat visual inspection notwithstanding. Left as a documented
+    negative result so this isn't re-attempted without re-measuring.
     """
     if len(r_peaks) == 0:
         return r_peaks
@@ -1134,6 +1166,36 @@ def _snap_to_local_peak(signal: np.ndarray, r_peaks: np.ndarray, search_radius: 
             continue
         snapped[i] = lo + int(np.argmax(np.abs(signal[lo:hi])))
     return snapped
+
+
+def _apply_refractory_guard(signal: np.ndarray, r_peaks: np.ndarray, fs: float,
+                             refractory_s: float = 0.2) -> np.ndarray:
+    """Physiological refractory-period guard, applied after detection + snap.
+
+    No two real R-peaks can be closer than `refractory_s` (200ms, i.e. a max
+    rate of ~300bpm) -- anything closer is not a second real beat. This is
+    a standard, detector-agnostic ECG processing step (every clinical
+    detector has one) and is complementary to, not a replacement for,
+    detect_r_peaks' t_inspect_period fix: that fix addresses XQRS's own
+    disabled-by-default T-wave check at the source; this guard is a
+    second, algorithm-independent safety net that catches any T-wave (or
+    other) false peak that still slips through, on this or any future
+    detector. When two peaks fall inside the refractory window, the one
+    with the larger |amplitude| on `signal` is kept (the true R-peak is
+    taller than a T-wave) and the other is discarded.
+    """
+    if len(r_peaks) < 2:
+        return r_peaks
+    min_gap = int(round(refractory_s * fs))
+    kept = [int(r_peaks[0])]
+    for r in r_peaks[1:]:
+        r = int(r)
+        if r - kept[-1] < min_gap:
+            if abs(float(signal[r])) > abs(float(signal[kept[-1]])):
+                kept[-1] = r
+        else:
+            kept.append(r)
+    return np.asarray(kept, dtype=int)
 
 
 def detect_and_segment(signal: np.ndarray, fs: float, cfg: BeatWindowConfig = BEATS,
@@ -1160,6 +1222,7 @@ def detect_and_segment(signal: np.ndarray, fs: float, cfg: BeatWindowConfig = BE
     peaks_from = detection_signal if detection_signal is not None else signal
     r_peaks = detect_r_peaks(peaks_from, fs)
     r_peaks = _snap_to_local_peak(signal, r_peaks, search_radius=snap_radius)
+    r_peaks = _apply_refractory_guard(signal, r_peaks, fs)
     return segment_beats(signal, fs, r_peaks, cfg)
 
 

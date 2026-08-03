@@ -1045,6 +1045,93 @@ def page_confusion(c, ctx):
 # Orchestration
 # ==========================================================================
 
+_MEDGEMMA_STATUS_EXPLAIN = {
+    "SKIPPED_CRITICAL":
+        "MedGemma was NOT called. A CRITICAL verdict bypasses the language model entirely, by "
+        "design (agent_bridge.render_narrative) -- at the level where a clinician must look "
+        "anyway, no generative text is allowed between the rule engine and the reader. The prose "
+        "below is therefore the DETERMINISTIC fallback: assembled by template directly from the "
+        "rule trace, with no model-authored wording.",
+    "SKIPPED_NOT_ASSESSABLE":
+        "MedGemma was NOT called. Too little signal survived quality gating to assess this "
+        "segment, so the narrative below is the deterministic fallback and describes missing "
+        "data, not a clean reading.",
+    "UNAVAILABLE_FALLBACK":
+        "MedGemma was called but did not respond (endpoint unreachable). The prose below is the "
+        "deterministic template fallback, not model output.",
+    "ACCEPTED":
+        "MedGemma output was accepted. The prose below is AI-GENERATED and merged with the "
+        "deterministic rule trace, which it may not contradict -- any narrative asserting a "
+        "threshold was exceeded when the trace says otherwise is rejected automatically.",
+}
+
+
+def page_narrative(c, ctx):
+    """Renders the narrative block and, crucially, whether a language model
+    wrote any of it. The narrative is the only free-prose element in this
+    document; a reader must never have to guess whether it was generated."""
+    rj = ctx["report"]
+    r = rj["recording"]
+    y = _page_header(c, "Narrative and MedGemma provenance", r["patient_id"], r["segment_id"],
+                     ctx["narrative_page_no"], ctx["n_pages"])
+
+    status = (rj.get("medgemma") or {}).get("status", "NOT_RECORDED")
+    ai_authored = status == "ACCEPTED"
+
+    # Provenance banner first -- before the prose, so it cannot be read without it.
+    banner = HexColor("#CC0000") if ai_authored else HexColor("#0969da")
+    c.setFillColor(banner)
+    c.rect(MARGIN, y - 30, PAGE_W - 2 * MARGIN, 32, fill=1, stroke=0)
+    c.setFillColor(white)
+    c.setFont(FONT_B, 9.5)
+    c.drawString(MARGIN + 8, y - 12,
+                 "AI-GENERATED PROSE — MedGemma authored this narrative" if ai_authored
+                 else "NOT AI-GENERATED — deterministic template output, no model text")
+    c.setFont(FONT, 7.5)
+    c.drawString(MARGIN + 8, y - 24, f"medgemma.status = {status}")
+    y -= 44
+
+    _txt(c, MARGIN, y, "What that status means", 9.5, FONT_B)
+    y -= 13
+    y = _wrap(c, MARGIN, y,
+              _MEDGEMMA_STATUS_EXPLAIN.get(
+                  status, "Unrecognised MedGemma status -- treat the narrative's provenance as unknown."),
+              PAGE_W - 2 * MARGIN, size=8, leading=10)
+    y -= 10
+
+    mg = rj.get("medgemma") or {}
+    y = _wrap(c, MARGIN, y,
+              f"Configured endpoint: {mg.get('endpoint', 'n/a')}   |   model: {mg.get('model', 'n/a')}   "
+              f"|   risk level: {rj.get('risk_level')}",
+              PAGE_W - 2 * MARGIN, size=7.5, leading=10, color=HexColor("#57606a"))
+    y -= 12
+
+    _txt(c, MARGIN, y, "Narrative as delivered", 9.5, FONT_B)
+    y -= 14
+    c.setFillColor(HexColor("#f6f8fa"))
+    text_block = rj.get("narrative", "(no narrative recorded)")
+    est_h = 12 + sum(2 + 11 * max(1, int(c.stringWidth(ln, FONT, 8) / (PAGE_W - 2 * MARGIN - 20)) + 1)
+                     for ln in text_block.split("\n"))
+    c.rect(MARGIN, y - est_h + 6, PAGE_W - 2 * MARGIN, est_h, fill=1, stroke=0)
+    for line in text_block.split("\n"):
+        if not line.strip():
+            y -= 6
+            continue
+        emph = line.startswith("***")
+        y = _wrap(c, MARGIN + 8, y, line, PAGE_W - 2 * MARGIN - 16, size=8, leading=10.5,
+                  font=FONT_B if emph else FONT,
+                  color=HexColor("#CC0000") if emph else black)
+        y -= 2
+
+    y -= 10
+    y = _wrap(c, MARGIN, y,
+              "Every number in the narrative above is copied from the rule trace on page 2 -- the "
+              "narrative layer cannot introduce a value the rule engine did not compute. Verify any "
+              "figure here against that page.",
+              PAGE_W - 2 * MARGIN, size=7.5, leading=9.5, color=HexColor("#57606a"))
+    _footer(c)
+
+
 def _git_commit():
     try:
         import subprocess
@@ -1105,7 +1192,7 @@ def load_ground_truth(path: Path, beats) -> dict[int, str]:
 
 def build(report_path: Path, ecg_csv: Path, out_dir: Path,
           vitals_root: Path | None = None, ground_truth: Path | None = None,
-          classifier_path: Path | None = None) -> Path:
+          classifier_path: Path | None = None, narrative: bool = False) -> Path:
     saved = json.loads(report_path.read_text()) if report_path else None
     segment_id = (saved or {}).get("recording", {}).get("segment_id")
     recording = _parse_ecg(ecg_csv, segment_id)
@@ -1183,16 +1270,21 @@ def build(report_path: Path, ecg_csv: Path, out_dir: Path,
         "sqi": sqi, "mismatch": mismatch, "ground_truth": gt,
         "pipeline_version": "ecg_pipeline (agent_bridge.run_full_report)",
         "git_commit": _git_commit(),
-        "n_pages": 7 if gt else 6,
+        "n_pages": 6 + (1 if gt else 0) + (1 if narrative else 0),
+        "narrative_page_no": 7,
     }
 
     r = rj["recording"]
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"{r['patient_id']}_{r['segment_id']}_validation_report.pdf"
+    suffix = "_with_narrative" if narrative else ""
+    out_path = out_dir / f"{r['patient_id']}_{r['segment_id']}_validation_report{suffix}.pdf"
     c = pdfcanvas.Canvas(str(out_path), pagesize=A4)
     c.setTitle(f"ECG Validation Report — {r['patient_id']} / {r['segment_id']}")
     for fn in (page1, page2, page3, page4, page5, page6):
         fn(c, ctx)
+        c.showPage()
+    if narrative:
+        page_narrative(c, ctx)
         c.showPage()
     if gt:
         page_confusion(c, ctx)
@@ -1213,13 +1305,18 @@ def main(argv=None):
     ap.add_argument("--ground-truth", type=Path, default=None,
                     help="CSV: beat_index,timestamp_ms,true_label. Adds comparison + confusion matrix.")
     ap.add_argument("--classifier", type=Path, default=None)
+    ap.add_argument("--narrative", action="store_true",
+                    help="append a page rendering the report's narrative alongside its MedGemma "
+                         "provenance (whether a language model authored any of it). Off by "
+                         "default so the standard validation form is unchanged.")
     a = ap.parse_args(argv)
 
     for p in [a.report, a.ecg_csv] + ([a.ground_truth] if a.ground_truth else []):
         if not p.exists():
             raise SystemExit(f"not found: {p}")
 
-    out = build(a.report, a.ecg_csv, a.output, a.vitals_root, a.ground_truth, a.classifier)
+    out = build(a.report, a.ecg_csv, a.output, a.vitals_root, a.ground_truth, a.classifier,
+                narrative=a.narrative)
     print(f"wrote {out}")
     return 0
 

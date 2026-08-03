@@ -10,7 +10,21 @@ ecg_pipeline_with_medgemma.zip
 
 # Detailed historical docs kept locally for reference, not part of the
 # handover README.
-Docs/archive/
+docs/archive/
+
+# Generated PDFs (~30MB across ~70 files). These lived under data/reports/ or
+# an untracked annotation/ before the 2026-08-03 restructure and were never in
+# git; keeping them out avoids permanently bloating history with regenerable
+# binaries. The generators are tracked -- scripts/generate_validation_pdf.py
+# and scripts/annotation/generate_review_batch.py -- so any of these can be
+# rebuilt from the report JSON plus the source CSV.
+# One example of each format IS tracked, under examples/reports/.
+archive/pdfs/
+validation/**/*.pdf
+validation/**/*.png
+
+# Orphaned scratch output moved here by the restructure, kept on disk only.
+archive/processed_output/
 
 # Python
 __pycache__/

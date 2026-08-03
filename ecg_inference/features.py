@@ -89,12 +89,38 @@ def _wavelet_features(window: np.ndarray, wavelet: str = "db4") -> np.ndarray:
     ])
 
 
+# Column index of local_hrv within the morphological block (and so within the full
+# feature vector, morphology being first). Mirrors ecg_pipeline_core.py.
+LOCAL_HRV_FEATURE_IDX = 1
+
+
 def _morphological_features(window: np.ndarray, primary_pre_samples: int,
-                             rr_pre_ms: float | None, rr_post_ms: float | None) -> np.ndarray:
+                             rr_pre_ms: float | None, rr_post_ms: float | None,
+                             rr_flagged: bool = False) -> np.ndarray:
+    """[rr_pre, local_hrv, area_ratio, above_below_ratio, amplitude_range].
+
+    `rr_flagged` means an adjacent RR interval is out of physiological range -- in
+    practice a missed-beat gap across an SQI-rejected stretch. When set, local_hrv
+    is NaN rather than the raw difference, so a detection gap cannot enter the
+    classifier as physiology. Measured motivation: VitalPatch 184B27/seg1 beat 27
+    carried local_hrv = 5104 ms (a 5.1 s gap), and TreeSHAP made it the largest
+    single attribution in the segment, pushing that beat toward class V.
+
+    NaN rather than 0.0 because 0.0 is a real and common local_hrv (regular
+    rhythm); median-filled by fill_missing_local_hrv() on the batch path, and
+    treated natively as `missing` by XGBoost otherwise.
+
+    Mirrors ecg_pipeline/ecg_pipeline_core.py:_morphological_features -- keep the
+    two in sync (the SDNN 0.0 sentinel fix was applied to only one copy and stayed
+    live in this package as a result).
+    """
     r_idx = primary_pre_samples
 
     rr_pre = rr_pre_ms if rr_pre_ms is not None else 0.0
-    local_hrv = (rr_post_ms - rr_pre_ms) if (rr_pre_ms and rr_post_ms) else 0.0
+    if rr_flagged:
+        local_hrv = np.nan
+    else:
+        local_hrv = (rr_post_ms - rr_pre_ms) if (rr_pre_ms and rr_post_ms) else 0.0
 
     left = window[:r_idx]
     right = window[r_idx:]
@@ -280,7 +306,8 @@ def beat_feature_vector(beat: Beat, primary_pre_samples: int,
     if timing_only:
         return _timing_features(beat, drop_compensatory_pause=drop_compensatory_pause)
     normalized = robust_zscore(beat.primary_window)
-    morph = _morphological_features(normalized, primary_pre_samples, beat.rr_pre_ms, beat.rr_post_ms)
+    morph = _morphological_features(normalized, primary_pre_samples, beat.rr_pre_ms, beat.rr_post_ms,
+                                     rr_flagged=beat.rr_flagged)
     wavelet = _wavelet_features(normalized)
     parts = [morph, wavelet]
     if include_timing:
@@ -313,7 +340,38 @@ def batch_feature_matrix(beats: list[Beat], primary_pre_samples: int,
     if not rows:
         return np.zeros((0, _feature_width(include_timing, drop_compensatory_pause,
                                             timing_only, include_r_amp, include_qrs_shape))), []
-    return np.vstack(rows), idxs
+    matrix = np.vstack(rows)
+    if not timing_only:  # timing_only has no morphology block, so no local_hrv column
+        matrix, _ = fill_missing_local_hrv(matrix)
+    return matrix, idxs
+
+
+def fill_missing_local_hrv(matrix: np.ndarray, col: int = LOCAL_HRV_FEATURE_IDX) -> tuple[np.ndarray, dict]:
+    """Replaces NaN local_hrv (missed-beat gaps) with the MEDIAN of this segment's
+    valid local_hrv values. Median rather than mean because a high-ectopy strip has
+    a long-tailed distribution a mean would chase; not 0.0, because that asserts
+    "perfectly regular", a real and common reading. Falls back to 0.0 only when the
+    whole column is missing, reporting that in stats["all_missing"].
+
+    Mirrors ecg_pipeline/ecg_pipeline_core.py:fill_missing_local_hrv."""
+    stats = {"n_missing": 0, "n_total": int(matrix.shape[0]), "fill_value": None,
+             "all_missing": False}
+    if matrix.size == 0 or col >= matrix.shape[1]:
+        return matrix, stats
+    missing = np.isnan(matrix[:, col])
+    stats["n_missing"] = int(missing.sum())
+    if not missing.any():
+        return matrix, stats
+    valid = matrix[~missing, col]
+    if len(valid) == 0:
+        stats["all_missing"] = True
+        stats["fill_value"] = 0.0
+        matrix[missing, col] = 0.0
+        return matrix, stats
+    fill = float(np.median(valid))
+    stats["fill_value"] = fill
+    matrix[missing, col] = fill
+    return matrix, stats
 
 
 def recording_level_hrv(beats: list[Beat]) -> dict:
@@ -321,7 +379,19 @@ def recording_level_hrv(beats: list[Beat]) -> dict:
     the stage 8 risk scorer, not the beat classifier."""
     rr = np.array([b.rr_post_ms for b in beats if b.rr_post_ms is not None and not b.rr_flagged])
     if len(rr) < 3:
-        return {"sdnn_ms": 0.0, "rmssd_ms": 0.0, "pnn50_pct": 0.0, "lf_hf_ratio": 0.0, "qrs_width_trend": 0.0}
+        # sdnn_ms=None (not 0.0): fewer than 3 valid RR intervals means SDNN
+        # is genuinely undefined here, not measured-and-zero. A hardcoded
+        # 0.0 sentinel is indistinguishable downstream from a real
+        # (physiologically implausible) zero-variability reading and would
+        # silently satisfy score_recording()'s "SDNN < threshold" check on
+        # segments with too little data to say anything -- see
+        # score_recording() and _build_rule_trace() for the None-aware
+        # handling this requires. The other fields aren't threshold-checked
+        # anywhere downstream, so they're left as 0.0 to avoid unrelated
+        # risk to callers that assume a float.
+        # Mirrored from ecg_pipeline_core.recording_level_hrv (commit e0da1f7);
+        # the two packages carry independent copies of this function.
+        return {"sdnn_ms": None, "rmssd_ms": 0.0, "pnn50_pct": 0.0, "lf_hf_ratio": 0.0, "qrs_width_trend": 0.0}
 
     sdnn = float(np.std(rr, ddof=1))
     diffs = np.diff(rr)

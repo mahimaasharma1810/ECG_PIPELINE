@@ -3,7 +3,7 @@
 Deployment-only package for turning one raw ECG recording into a
 structured risk report. No training code, no `torch`. Every number this
 package produces comes from the same frozen logic as
-`ecg_pipeline/ecg_pipeline_core.py` — see `../Docs/inference_ready.md` for
+`ecg_pipeline/ecg_pipeline_core.py` — see `../docs/inference_ready.md` for
 the byte-for-byte-identical proof. For the project-level story, see the
 root `README.md`.
 
@@ -41,7 +41,7 @@ python run_inference.py \
 | `--input` | yes | — | Raw ECG file: a VitalPatch/SeNSiO CSV, or a WFDB record path (no extension, e.g. `data/raw/public/mitdb/100`) |
 | `--output` | yes | — | Where to write the structured JSON report |
 | `--source` | no | `vitalpatch` | One of `vitalpatch`, `sensio`, `wfdb` — which parser to use for `--input` |
-| `--classifier` | no | `ecg_inference/models/five_class_xgb.json` | Path to the pretrained classifier weights |
+| `--classifier` | no | `models/production/five_class_xgb.json` | Path to the pretrained classifier weights |
 | `--segment-index` | no | `0` | A VitalPatch file can split into multiple gap-separated segments (see `Recording` in `preprocess.py`); which one to report on |
 | `--narrative` | no | off | Also compute the deterministic (network-independent) narrative and attach it as `narrative` / `narrative_source` in the output JSON. Does **not** call MedGemma. |
 
@@ -162,8 +162,8 @@ default of 0.15).
 
 | Trust it | Treat as a screening signal, not a finding | Don't trust it as calibrated |
 |---|---|---|
-| `N` and `V` beat counts (F1 0.972 / 0.826) | `S` beat counts (F1 0.139 — 67.6% of true S beats get called N) | `confidence.tier` / `confidence.statement` — a heuristic tied to which class the deciding rule depends on, **not** a statistically calibrated probability (no conformal set loaded by default) |
-| `BIGEMINY` / `TRIGEMINY` / `VT_RUN` findings (pure RR/label pattern rules, not classifier-dependent beyond N/V which are reliable) | `F` beat counts (F1 0.011 — essentially unsolved, treat any F as noise) | `safety_overrides` — schema exists but is structurally inert; no vitals source is wired into this ECG-only path |
+| `N` and `V` beat counts (F1 0.966 / 0.830) | `S` beat counts (F1 0.152 — 65.1% of true S beats get called N) | `confidence.tier` / `confidence.statement` — a heuristic tied to which class the deciding rule depends on, **not** a statistically calibrated probability (no conformal set loaded by default) |
+| `BIGEMINY` / `TRIGEMINY` / `VT_RUN` findings (pure RR/label pattern rules, not classifier-dependent beyond N/V which are reliable) | `F` beat counts (F1 0.005 — essentially unsolved, treat any F as noise) | `safety_overrides` — schema exists but is structurally inert; no vitals source is wired into this ECG-only path |
 | `AFIB_SUSPECTED` findings (validated 2026-07-28: sensitivity 0.971, F1 0.893 against real LTAFDB ground truth at the current threshold) | `pipeline_stage9_llm_status` when `bypassed_llm=false` — a live LLM call, occasionally misstates a numeric comparison in free text (caught/stripped before saving in the full `agent_bridge.py` path, but this package's own `--narrative` output is the pure deterministic template, not LLM text at all) | Any single segment in isolation for a NOT_ASSESSABLE-adjacent recording — the `< 5 beats analyzed` floor exists specifically because too little surviving signal should never produce a confident-sounding number |
 
 `risk_level`/`rule_trace`/`deciding_rule` themselves are deterministic

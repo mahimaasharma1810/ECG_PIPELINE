@@ -11,14 +11,14 @@ scoring, and feeds the returned scores back into the risk cascade as
 escalation-only safety overrides.
 
 **Authoritative technical reference:**
-[`Docs/PIPELINE_METHODS_AND_RESULTS.md`](Docs/PIPELINE_METHODS_AND_RESULTS.md) —
+[`docs/thesis/PIPELINE_METHODS_AND_RESULTS.md`](docs/thesis/PIPELINE_METHODS_AND_RESULTS.md) —
 full stage-by-stage methods, rejected alternatives, and every measured result,
 with the artifact each number came from. This file is the map; that file is the
 evidence.
 
 Plain-English walkthrough with no ML/ECG background assumed:
-[`Docs/PROJECT_OVERVIEW.md`](Docs/PROJECT_OVERVIEW.md).
-Classifier training/eval handover history: [`Docs/project_doc.md`](Docs/project_doc.md).
+[`docs/thesis/PROJECT_OVERVIEW.md`](docs/thesis/PROJECT_OVERVIEW.md).
+Classifier training/eval handover history: [`docs/project_doc.md`](docs/project_doc.md).
 
 ---
 
@@ -44,7 +44,7 @@ ecg_inference/               DEPLOYMENT: inference-only package, no training cod
 ecg_pipeline/                DEVELOPMENT pipeline: same logic as ecg_inference/, plus the
                               live MedGemma integration, batch runners, and demo tooling
   ecg_pipeline_core.py          the 9-stage pipeline; source of truth ecg_inference/ was
-                                 extracted from verbatim (see Docs/inference_ready.md)
+                                 extracted from verbatim (see docs/inference_ready.md)
   agent_bridge.py               two CLI modes: `push` (ECG + real vitals -> MedGemma-Agent,
                                  NEWS2/qSOFA loopback) and `report` (single-file report)
   batch_vitalpatch_report.py    resumable batch runner over data/raw/vitalpatch/
@@ -59,20 +59,24 @@ ecg_pipeline/                DEVELOPMENT pipeline: same logic as ecg_inference/,
   example_reports/              8 saved JSON reports (7 WFDB + 1 VitalPatch)
 
 training/                    TRAINING-ONLY: never imported by ecg_inference/ or the
-                              production report path (see Docs/inference_ready.md, item 4)
+                              production report path (see docs/inference_ready.md, item 4)
   ecg_pipeline_tools.py          download-datasets / train-classifiers / eval-classifier /
                                  train-twostage / analyze-twostage CLI
   model_artifacts/               4 files: the SVDB train-enrichment comparison pair
                                  (five_class_xgb_with_svdb / _no_svdb, + .classes.json each).
                                  The 46 earlier experimental artifacts were removed in
                                  commit 8124726 -- their results live in
-                                 Docs/archive/ABLATION_REPORT.md, not in this repo.
+                                 docs/archive/ABLATION_REPORT.md, not in this repo.
   _original_stages/              pre-consolidation per-stage source files, kept for diffing only
 
-Docs/                        documentation (16 tracked files)
+docs/                        documentation (18 tracked files)
   PIPELINE_METHODS_AND_RESULTS.md  ** the authoritative methods + measured results reference **
   HANDOFF.md                     teammate handoff -- what's done, broken, and the task order
                                  (source of truth for the 2026-07-30 session below)
+  CLINICAL_TECHNICAL_AUDIT_HANDOFF_2026-07-31.md  teammate handoff from a full preprocessing/
+                                 R-peak/flat-signal audit -- 5 newly found bugs (evidence +
+                                 file:line + fix direction), no code changed yet
+  AUDIT_2026-07-31.md            R-peak over-detection trust audit + SDNN/waveform-Kalman fixes
   AGENT_RULES.md                standing research-integrity rules -- read before touching the
                                  classifier or training code
   DATASETS.md                    every dataset used, where it lives, what it's for
@@ -98,7 +102,7 @@ Docs/                        documentation (16 tracked files)
 data/                        GITIGNORED -- raw datasets, generated reports, batch manifests,
                               UI caches. Every measured result quoted below was computed from
                               files here; they are not in git (icentia11k alone is ~257GB).
-                              See Docs/DATASETS.md for how to re-download each source.
+                              See docs/thesis/DATASETS.md for how to re-download each source.
 
 MedGemma-Agent/              git submodule (separate repo: saranambiar/MedGemma-Agent) -- the
                               vitals + ABG post-op monitoring agent this pipeline pushes to.
@@ -164,14 +168,14 @@ python -m ecg_pipeline.manifest_summary          # combined summary + showcase r
 
 ### Training / evaluation
 
-Real datasets required (see [`Docs/DATASETS.md`](Docs/DATASETS.md)); governed by
-[`Docs/AGENT_RULES.md`](Docs/AGENT_RULES.md) — read it first.
+Real datasets required (see [`docs/thesis/DATASETS.md`](docs/thesis/DATASETS.md)); governed by
+[`docs/decisions/AGENT_RULES.md`](docs/decisions/AGENT_RULES.md) — read it first.
 
 ```bash
 python -m training.ecg_pipeline_tools download-datasets --all
 python -m training.ecg_pipeline_tools train-classifiers --dataset mitdb
 python -m training.ecg_pipeline_tools eval-classifier \
-    --model ecg_pipeline/models/five_class_xgb.json --split-set ds2
+    --model models/production/five_class_xgb.json --split-set ds2
 ```
 
 ---
@@ -180,26 +184,26 @@ python -m training.ecg_pipeline_tools eval-classifier \
 
 Every number in this section was computed from a file on disk. Sources are named.
 
-### 1. Beat classifier — DS2 held-out, 45,804 beats
+### 1. Beat classifier — DS2 held-out, 45,881 beats
 
-*Source: `Docs/archive/ABLATION_REPORT.md`, "Production baseline" (gitignored,
+*Source: `docs/archive/ABLATION_REPORT.md`, "Production baseline" (gitignored,
 local only). Patient-level inter-patient split; never re-tuned against DS2.*
 
 | Class | Sensitivity | Precision | F1 | Support | Trust |
 |---|---|---|---|---|---|
-| N (Normal) | 0.972 | 0.973 | **0.972** | 40,634 | High — reliable |
-| S (Supraventricular) | 0.130 | 0.150 | **0.139** | 1,795 | Low — screening signal only |
-| V (Ventricular) | 0.912 | 0.754 | **0.826** | 3,005 | Moderate-high — the clinically critical class |
-| F (Fusion) | 0.005 | 0.125 | **0.011** | 363 | Essentially unsolved — treat as noise |
+| N (Normal) | 0.966 | 0.965 | **0.966** | 40,711 | High — reliable |
+| S (Supraventricular) | 0.140 | 0.165 | **0.152** | 1,795 | Low — screening signal only |
+| V (Ventricular) | 0.907 | 0.765 | **0.830** | 3,005 | Moderate-high — the clinically critical class |
+| F (Fusion) | 0.003 | 0.083 | **0.005** | 363 | Essentially unsolved — treat as noise |
 | Q (Unknown) | 0.000 | 0.000 | 0.000 | 7 | N/A — near-zero support |
 
-**Macro-F1: 0.3895.** N is 40,634 of 45,804 beats (88.7%), so a model that only
+**Macro-F1: 0.3906.** N is 40,711 of 45,881 beats (88.7%), so a model that only
 ever predicts N scores 88.7% "accuracy" while being clinically useless — never
-use accuracy as the success metric here (`Docs/AGENT_RULES.md`, rule 4).
+use accuracy as the success metric here (`docs/decisions/AGENT_RULES.md`, rule 4).
 
 ### 2. AFib rule validation — LTAFDB, 84 records, 449,749 windows
 
-*Source: `Docs/archive/ABLATION_REPORT.md`, "AFib rule validation". Ground truth
+*Source: `docs/archive/ABLATION_REPORT.md`, "AFib rule validation". Ground truth
 from real rhythm-change annotations. Validated 2026-07-28.*
 
 | RR-CoV threshold | Sensitivity | Specificity | F1 |
@@ -216,7 +220,7 @@ tested. Changed in both `ecg_pipeline_core.py` and `ecg_inference/classifier.py`
 regenerated 2026-07-30 via `python -m ecg_pipeline.batch_vitalpatch_report`
 after the parser fix (previous manifest predated it and had 70 `PARSE_ERROR`
 rows — see prior "Known and unfixed" entry, now resolved); aggregated in
-`Docs/PIPELINE_METHODS_AND_RESULTS.md` §6.1.*
+`docs/thesis/PIPELINE_METHODS_AND_RESULTS.md` §6.1.*
 
 | Metric | Value |
 |---|---|
@@ -236,7 +240,7 @@ LOW 1,881 (51.8%) · MEDIUM 166 (4.6%) · HIGH 552 (15.2%) · CRITICAL 290 (8.0%
 
 **Updated 2026-07-31:** this CRITICAL rate was substantially inflated by an
 R-peak over-detection bug (XQRS misreading T-waves as extra beats — see
-`Docs/AUDIT_2026-07-31.md` §7). Re-scoring all 2,889 assessable segments with
+`docs/audits/AUDIT_2026-07-31.md` §7). Re-scoring all 2,889 assessable segments with
 the fix applied gives **CRITICAL 15/2,889 (0.5%)**, LOW 1,714, MEDIUM 141,
 HIGH 979, NOT_ASSESSABLE 40. The 290-segment / 10.0% figures above describe
 the *original, buggy* run and are kept for historical context, not as the
@@ -268,7 +272,7 @@ rules, threshold config, DB nullability + a 2,588-row migration, input
 guardrails, and the ECG-side payload/loopback). The subtlest: `input_guardrails`
 precomputes NEWS2 and `risk_scorer` does `state.get("news2") or calculate_news2(...)`
 — a Pydantic instance is always truthy, so the risk scorer's own call never runs.
-Full detail in `Docs/PIPELINE_METHODS_AND_RESULTS.md` §7.3.
+Full detail in `docs/thesis/PIPELINE_METHODS_AND_RESULTS.md` §7.3.
 
 ### 5. End-to-end multimodal push — full batch complete 2026-07-30
 
@@ -297,7 +301,7 @@ simultaneously). One of those 52 segments (`Patch_184635`,
 `1780050938536_..._seg0`) also independently reached **NEWS2 = 7** (HR score 3
 + RR score 3 + Temp score 1, from real HR 150.3 bpm, RR 26.7/min, Temp 38.3°C)
 — **this corrects a prior assumption in this project** (see "Known and
-unfixed" and `Docs/NEWS2_PARTIAL_COVERAGE_DECISION.md`): NEWS2 ≥ 7 is not
+unfixed" and `docs/decisions/NEWS2_PARTIAL_COVERAGE_DECISION.md`): NEWS2 ≥ 7 is not
 arithmetically unreachable with only 3 components (HR max 3 + RR max 3 + Temp
 max 2 = 8, so 7 is reachable), it is just rare — 1 real segment out of 3,632
 reached it.
@@ -342,14 +346,14 @@ Listed explicitly so nobody builds on a number that isn't settled.
   sums to a possible 8, and one real segment measured exactly 7. It is rare,
   not impossible: 1 segment out of 3,632.
 
-- **S class (F1 0.139) and F class (F1 0.011) — closed research problem.** Four
+- **S class (F1 0.152) and F class (F1 0.005) — closed research problem.** Four
   genuinely different approaches were tried and all failed identically: extra
   timing features, +8.5M extra training beats (LTAFDB/SDDB), a two-stage
   gate-then-classify architecture in 5 variants, and a CNN+Transformer in 2 data
   variants. Every one that improved S regressed V past the project's
   zero-tolerance safety margin. **Do not re-attempt without new data.** The
   production model was never changed by any of these experiments. See
-  `Docs/archive/ABLATION_REPORT.md` and `Docs/CNN_TRANSFORMER_EXPERIMENT.md`.
+  `docs/archive/ABLATION_REPORT.md` and `docs/CNN_TRANSFORMER_EXPERIMENT.md`.
 
 - **SpO2 and blood pressure — hardware gap.** VitalPatch has no sensor for
   either. They are always emitted as `None` with `real: False`, never imputed and
@@ -361,7 +365,7 @@ Listed explicitly so nobody builds on a number that isn't settled.
   was disabled by default), inflating HR/PVC/AFib burden and feeding directly
   into the CRITICAL cascade. Fixed by enabling `t_inspect_period` + a
   refractory-period guard. Corrected the CRITICAL rate from 290/2,889 (10.0%)
-  to **15/2,889 (0.5%)**. See `Docs/AUDIT_2026-07-31.md` §7 for full
+  to **15/2,889 (0.5%)**. See `docs/audits/AUDIT_2026-07-31.md` §7 for full
   before/after numbers, including a flagged-not-explained 503-segment
   LOW→HIGH transition that needs its own review.
 
@@ -372,7 +376,7 @@ Listed explicitly so nobody builds on a number that isn't settled.
   way to settle whether this rate is signal or false-positive noise. All 15
   post-fix CRITICAL segments (not a sample — there are only 15) are prepared
   at `data/reports/clinician_review_sample.csv` (see
-  `Docs/CLINICIAN_REVIEW_INSTRUCTIONS.md`); no clinician has reviewed it yet.
+  `docs/CLINICIAN_REVIEW_INSTRUCTIONS.md`); no clinician has reviewed it yet.
 
 - **SDNN's "not enough data" case was silently sentinel-valued as 0.0 —
   FIXED in `ecg_pipeline_core.py` / `agent_bridge.py`, 2026-07-31, NOT yet
@@ -386,8 +390,8 @@ Listed explicitly so nobody builds on a number that isn't settled.
   **`ecg_inference/features.py` and `ecg_inference/classifier.py` (the
   package `run_inference.py` actually uses) still have the old 0.0-sentinel
   bug** — this breaks the dev/inference equivalence documented in
-  `Docs/inference_ready.md` and needs porting before the next equivalence
-  check. See `Docs/AUDIT_2026-07-31.md` §8.1.
+  `docs/inference_ready.md` and needs porting before the next equivalence
+  check. See `docs/audits/AUDIT_2026-07-31.md` §8.1.
 
 - **Waveform PNGs in clinician reports were unreadable — FIXED 2026-07-31,
   display-only.** The report's waveform reconstruction ran the full filter
@@ -399,7 +403,7 @@ Listed explicitly so nobody builds on a number that isn't settled.
   (`skip_emg_suppress=True`), mirroring what R-peak *detection* already does.
   Beat classification, rhythm findings, and the risk decision are unaffected
   — they come from the pipeline's own frozen output, not this display
-  reconstruction. See `Docs/AUDIT_2026-07-31.md` §8.2.
+  reconstruction. See `docs/audits/AUDIT_2026-07-31.md` §8.2.
 
 - **The ECG-only batch manifest was regenerated 2026-07-30** after the parser
   fix (`ecg_pipeline_core.py:292-307`, coerce-to-NaN with pairwise drop). Re-run
@@ -468,20 +472,20 @@ measurement that justifies it.
    `1f36dda` and `087f261` exist only on a local `dev` branch, so the submodule
    pointer recorded here cannot be resolved by a fresh clone. Needs coordination
    with the submodule's owner — it is a separate repository. Not attempted this
-   session; see `Docs/SESSION_LOG_TODAY.md`.
+   session; see `docs/SESSION_LOG_TODAY.md`.
 
 ### High value — quantifies risk that engineering alone cannot resolve
 
 7. **Get clinician adjudication on the 15 post-fix CRITICAL segments.** This
    is the largest unquantified risk in the system. The R-peak over-detection
-   fix (`Docs/AUDIT_2026-07-31.md` §7) corrected the CRITICAL count from 290
+   fix (`docs/audits/AUDIT_2026-07-31.md` §7) corrected the CRITICAL count from 290
    to 15 (0.5% of assessable), but V-class precision is still 0.754 (~1 in 4
    ventricular calls wrong) and PVC burden still drives both CRITICAL rules —
    there is no ground truth on this corpus, so even the corrected rate cannot
    be shown to be signal or noise from inside the pipeline. All 15 segments
    (not a sample — that's all there are post-fix) are prepared at
    `data/reports/clinician_review_sample.csv` (see
-   `Docs/CLINICIAN_REVIEW_INSTRUCTIONS.md`; not yet reviewed). Alert burden,
+   `docs/CLINICIAN_REVIEW_INSTRUCTIONS.md`; not yet reviewed). Alert burden,
    deployment readiness, and threshold tuning all depend on the answer.
 
 8. **Decide what the NEWS2 override should do on 3/6 coverage.** Corrected
@@ -491,7 +495,7 @@ measurement that justifies it.
    not impossible. The remaining question — whether a rare-but-real ≥7
    escalation on 3/6 coverage is clinically sound to act on — is a clinical
    safety decision, not an engineering one; four options are written up in
-   `Docs/NEWS2_PARTIAL_COVERAGE_DECISION.md` (the write-up is done, the
+   `docs/decisions/NEWS2_PARTIAL_COVERAGE_DECISION.md` (the write-up is done, the
    decision itself is not). *Note: the qSOFA ≥2 override works and drove all
    52 real escalations measured in the full batch.*
 
@@ -500,7 +504,7 @@ measurement that justifies it.
 9. **Sweep the AFib rule's `window=20`.** Only the threshold was ever swept
    (against LTAFDB, 449,749 windows). Window size remains an open validation
    question and the same harness can answer it. **Do not attempt without
-   sign-off** — untested statistical claims territory (see `Docs/HANDOFF.md`).
+   sign-off** — untested statistical claims territory (see `docs/HANDOFF.md`).
 
 10. **Calibrate the confidence tiers.** They are currently a heuristic; no
     conformal calibration set is loaded by default. `ConformalConfig` already
@@ -519,8 +523,8 @@ measurement that justifies it.
     (`0.0 < 20.0`) and silently forces MEDIUM. **`ecg_inference/features.py`
     and `ecg_inference/classifier.py` — the actual deployment package
     `run_inference.py` uses — were not updated** and still have the old bug.
-    This breaks the dev/inference equivalence `Docs/inference_ready.md`
-    otherwise documents. See `Docs/AUDIT_2026-07-31.md` §8.1 for the full
+    This breaks the dev/inference equivalence `docs/inference_ready.md`
+    otherwise documents. See `docs/audits/AUDIT_2026-07-31.md` §8.1 for the full
     writeup and exact lines to mirror.
 
 ### Explicitly not to be re-attempted
@@ -528,7 +532,7 @@ measurement that justifies it.
 - **S-class and F-class improvement on the current data.** Four independent
   approaches failed identically, each trading V-class regression for S-class
   gain. Closed until genuinely new labeled data or multi-lead hardware exists —
-  not a tuning problem. See `Docs/archive/ABLATION_REPORT.md`.
+  not a tuning problem. See `docs/archive/ABLATION_REPORT.md`.
 
 ---
 
@@ -549,5 +553,5 @@ authored as part of this pipeline's work.
 
 Before touching `ecg_pipeline_core.py`, `training/ecg_pipeline_tools.py`, or
 anything under a `models/` directory, read
-[`Docs/AGENT_RULES.md`](Docs/AGENT_RULES.md) — every rule in it exists because it
+[`docs/decisions/AGENT_RULES.md`](docs/decisions/AGENT_RULES.md) — every rule in it exists because it
 was violated once at real cost.

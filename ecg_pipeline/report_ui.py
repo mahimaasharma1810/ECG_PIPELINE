@@ -25,7 +25,7 @@ filtering, or classification -- every graph is built from arrays the
 EXISTING, unmodified ECGPipeline / agent_bridge actually produced for that
 exact input:
   * RAW panel: `recording.signal_mv` as parsed by the existing
-    parse_vitalpatch_ecg/parse_sensio_ecg -- untouched.
+    parse_vitalpatch_ecg/parse_prorhythm_ecg -- untouched.
   * PREPROCESSED panel: the output of `demo_stream.compute_filtered_signal`,
     which calls the SAME public Stage 2-4 functions (`run_sqi_gate`,
     `to_target_rate`, `apply_filter_chain`) that ECGPipeline.run() calls
@@ -81,7 +81,7 @@ from ecg_pipeline.demo_stream import (
     compute_filtered_signal, save_synthetic_report,
 )
 from ecg_pipeline.ecg_pipeline_core import (
-    DATA_RAW, ECGPipeline, MODELS_DIR, TARGET_FS, discover_vitalpatch_files, parse_sensio_ecg,
+    DATA_RAW, ECGPipeline, MODELS_DIR, TARGET_FS, discover_vitalpatch_files, parse_prorhythm_ecg,
     parse_vitalpatch_ecg,
 )
 from ecg_pipeline.synthetic_ecg import SCENARIOS, generate_scenario
@@ -114,15 +114,15 @@ def _find_raw_file(source: str, patient_id: str, segment_id: str) -> Path | None
     """Reverse-engineers the raw file path from the naming conventions
     used by parse_vitalpatch_ecg / batch_vitalpatch_report.py and
     batch_prorhythm_report.py (segment_id = f"{csv_stem}_seg{n}" for
-    vitalpatch; the prorhythm/SeNSiO path is one file == one recording)."""
+    vitalpatch; the prorhythm/ProRhythm path is one file == one recording)."""
     if source == "vitalpatch":
         stem = re.sub(r"_seg\d+$", "", segment_id)
         candidate = DATA_RAW / "vitalpatch" / f"Patch_{patient_id}" / f"{stem}.csv"
         return candidate if candidate.exists() else None
-    if source == "sensio":
-        # parse_sensio_ecg() sets Recording.source="sensio" (see ecg_pipeline_core.py),
+    if source == "prorhythm":
+        # parse_prorhythm_ecg() sets Recording.source="prorhythm" (see ecg_pipeline_core.py),
         # but these raw files live under data/raw/prorhythm/ -- confirmed directly via
-        # batch_prorhythm_report.py, which reuses parse_sensio_ecg() for that directory.
+        # batch_prorhythm_report.py, which reuses parse_prorhythm_ecg() for that directory.
         stem = re.sub(r"_seg\d+$", "", segment_id)
         root = DATA_RAW / "prorhythm"
         if root.exists():
@@ -144,8 +144,8 @@ def _reconstruct_waveform(report_json: dict) -> dict | None:
     if r["source"] == "vitalpatch":
         recordings = parse_vitalpatch_ecg(raw_path)
         recording = next((rec for rec in recordings if rec.segment_id == r["segment_id"]), None)
-    elif r["source"] == "sensio":
-        recording = parse_sensio_ecg(raw_path)
+    elif r["source"] == "prorhythm":
+        recording = parse_prorhythm_ecg(raw_path)
     else:
         recording = None
     if recording is None:
@@ -212,7 +212,8 @@ def _beat_summary_table(beat_summary: dict) -> str:
         flag = " &mdash; LOW CONFIDENCE" if info.get("confidence") == "LOW" else ""
         rows.append(
             f"<tr><td>{escape(cls)}</td><td>{info['count']}</td>"
-            f"<td>{info['pct_of_analyzed_beats']}%</td><td>{escape(info['confidence'])}{flag}</td></tr>"
+            f"<td>{agent_bridge.beat_summary_pct(info)}%</td>"
+            f"<td>{escape(info['confidence'])}{flag}</td></tr>"
         )
     return "\n".join(rows) or "<tr><td colspan=4>(no beats survived quality gating)</td></tr>"
 
@@ -273,7 +274,7 @@ PAGE_TEMPLATE = """<!doctype html>
     <h2>Findings</h2>
     <h3>Beat classes</h3>
     <table>
-      <tr><th>Class</th><th>Count</th><th>% of analyzed</th><th>Confidence</th></tr>
+      <tr><th>Class</th><th>Count</th><th>% of detected</th><th>Confidence</th></tr>
       {beat_rows}
     </table>
     <h3>Rhythm findings</h3>
@@ -730,7 +731,9 @@ async function poll() {{
     beatBody.innerHTML = "";
     Object.entries(s.beat_summary || {{}}).forEach(([cls, info]) => {{
       const tr = document.createElement("tr");
-      tr.innerHTML = "<td>" + esc(cls) + "</td><td>" + info.count + "</td><td>" + info.pct_of_analyzed_beats +
+      const pct = (info.pct_of_detected_beats !== undefined)
+        ? info.pct_of_detected_beats : info.pct_of_analyzed_beats;
+      tr.innerHTML = "<td>" + esc(cls) + "</td><td>" + info.count + "</td><td>" + pct +
         "%</td><td>" + esc(info.confidence) + (info.confidence === "LOW" ? " (LOW CONF)" : "") + "</td>";
       beatBody.appendChild(tr);
     }});

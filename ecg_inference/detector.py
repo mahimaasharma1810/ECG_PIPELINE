@@ -260,7 +260,7 @@ def detect_and_segment(signal: np.ndarray, fs: float, cfg: BeatWindowConfig = BE
 
     `snap_radius` defaults to 8, the value validated via a 13-record MITDB
     (wfdb) sweep -- see _snap_to_local_peak's docstring. That sweep was
-    wfdb-only; on real-device sources (vitalpatch/sensio) radius=8 was
+    wfdb-only; on real-device sources (vitalpatch/prorhythm) radius=8 was
     later found to cause catastrophic beat-level over-culling on a subset
     of recordings (up to 130/133 beats rejected via R_PEAK_NOT_LOCAL_MAX
     on one, non-monotonically -- radius 3/5/10/15/20 were all fine, only

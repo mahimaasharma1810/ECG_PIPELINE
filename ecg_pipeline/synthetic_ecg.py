@@ -28,7 +28,7 @@ These are RHYTHM/PATTERN demos, not a source of realistic per-class beat
 morphology. Ventricular ("V") beats here are built from a parametric wide/
 tall pulse chosen to trip the same width+amplitude+prematurity criteria a
 real PVC trips (and that this project's classifier is comparatively good
-at, DS2 held-out V F1=0.826) -- they are NOT a clinically faithful PVC
+at, DS2 held-out V F1=0.830) -- they are NOT a clinically faithful PVC
 waveform, and S/F-class morphology is not attempted at all (the classifier
 is weak on S/F even on real data; synthesizing fake S/F morphology would
 only produce meaningless "detections" of those classes). Do not use any
@@ -62,7 +62,7 @@ SCENARIOS = ["NORMAL", "PVC_BURDEN", "VT_RUN", "AFIB_LIKE", "NOISY"]
 
 # Device-native sample rates this module targets, per the task spec.
 FS_VITALPATCH = 125.0
-FS_SENSIO = 100.0
+FS_PRORHYTHM = 100.0
 
 
 @dataclass
@@ -501,7 +501,8 @@ def generate_afib_like(duration_s: float = 90.0, fs: float = FS_VITALPATCH, hear
     gt = GroundTruth(scenario="AFIB_LIKE", fs=fs, duration_s=len(signal) / fs, heart_rate_bpm=heart_rate_bpm,
                       backend=backend, n_cycles=len(cycles), afib_rr_cv_target=rr_cv,
                       notes=f"High RR-interval variability injected via heart_rate_std={heart_rate_std} "
-                            f"(cycle-length RR CV ~= {rr_cv:.3f}, rule threshold is 0.15). "
+                            f"(cycle-length RR CV ~= {rr_cv:.3f}, rule threshold is "
+                            f"{RISK.afib_rr_cv_threshold:.2f}). "
                             f"Expect AFIB_SUSPECTED in rhythm_findings.")
     return recording, gt
 

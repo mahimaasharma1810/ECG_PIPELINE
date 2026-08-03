@@ -5,7 +5,7 @@ Extracted verbatim from ecg_pipeline/ecg_pipeline_core.py's config.py,
 audit.py, ingest.py, quality.py, resample.py, and filters.py sections
 (inference-safe: no code here trains, fits, or writes a model). See
 EDGE_DEPLOYMENT_FIX_REPORT.md for the provenance of the source="wfdb" vs
-"vitalpatch"/"sensio" behavior encoded in these thresholds/filters.
+"vitalpatch"/"prorhythm" behavior encoded in these thresholds/filters.
 """
 from __future__ import annotations
 
@@ -32,8 +32,10 @@ constant says which recommendation it implements.
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_RAW = PROJECT_ROOT / "data" / "raw"
-MODELS_DIR = Path(__file__).resolve().parent / "models"
-MODELS_DIR.mkdir(exist_ok=True)
+# Single repo-level models tree shared with ecg_pipeline -- see the matching
+# comment in ecg_pipeline_core.py. Inference only ever loads production.
+MODELS_DIR = PROJECT_ROOT / "models" / "production"
+MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
 TARGET_FS = 125.0  # Hz, common resample target (VitalPatch native rate)
 
@@ -63,7 +65,7 @@ class SQIThresholds:
     missing_frac_max: float = 0.03
     kurtosis_min: float = 1.5  # QRS impulse character, computed per-beat-window, NOT RR-interval based
     # Real device recordings arrive in arbitrary firmware-scaled raw ADC counts with no published
-    # mV-per-count constant (VitalPatch and SeNSiO both do this). Absolute-mV thresholds would be
+    # mV-per-count constant (VitalPatch and ProRhythm both do this). Absolute-mV thresholds would be
     # meaningless without that calibration constant, so baseline wander is expressed as a ratio of
     # the window's own robust dynamic range (IQR) instead of a hard mV number.
     baseline_wander_ratio_max: float = 1.2
@@ -209,11 +211,11 @@ class Recording:
     signal_mv: np.ndarray          # 1-D raw signal, arbitrary units at this stage
     timestamps_ms: np.ndarray      # 1-D, same length as signal, epoch ms (or synthetic)
     fs_nominal: float              # nominal sample rate in Hz
-    source: str                   # "vitalpatch" | "sensio" | "wfdb"
+    source: str                   # "vitalpatch" | "prorhythm" | "wfdb"
     patient_id: str
     segment_id: str
     gaps: list = field(default_factory=list)          # list of (start_idx, end_idx, gap_ms) flagged, not dropped
-    already_bandpass_filtered: bool = False             # SeNSiO pre-filtered variant
+    already_bandpass_filtered: bool = False             # ProRhythm pre-filtered variant
     meta: dict = field(default_factory=dict)
 
 
@@ -302,8 +304,8 @@ def parse_vitalpatch_vitals(csv_path: Path) -> pd.DataFrame:
     return df.ffill()
 
 
-def parse_sensio_ecg(csv_path: Path) -> Recording:
-    """SeNSiO: 11 metadata rows, blank rows, header at row 16 (0-indexed 15).
+def parse_prorhythm_ecg(csv_path: Path) -> Recording:
+    """ProRhythm: 11 metadata rows, blank rows, header at row 16 (0-indexed 15).
 
     Raw variant has column 'ECG'; pre-filtered variant has 'ECG_Raw' and
     'ECG_Filtered' — if the filtered column is present we mark the
@@ -338,7 +340,7 @@ def parse_sensio_ecg(csv_path: Path) -> Recording:
     else:
         signal = df["ECG"].to_numpy(dtype=np.float64)
 
-    fs_nominal = _sensio_fs_from_command(meta.get("Command Sent", ""))
+    fs_nominal = _prorhythm_fs_from_command(meta.get("Command Sent", ""))
     n = len(signal)
     timestamps_ms = np.arange(n) * (1000.0 / fs_nominal)
 
@@ -346,7 +348,7 @@ def parse_sensio_ecg(csv_path: Path) -> Recording:
         signal_mv=signal,
         timestamps_ms=timestamps_ms,
         fs_nominal=fs_nominal,
-        source="sensio",
+        source="prorhythm",
         patient_id=meta.get("Bluetooth Device ID", "unknown"),
         segment_id=csv_path.stem,
         already_bandpass_filtered=already_filtered,
@@ -354,7 +356,7 @@ def parse_sensio_ecg(csv_path: Path) -> Recording:
     )
 
 
-def _sensio_fs_from_command(command_sent: str, default_fs: float = 100.0) -> float:
+def _prorhythm_fs_from_command(command_sent: str, default_fs: float = 100.0) -> float:
     """Parse 'STARTECG_F:100' style command strings for sample rate."""
     if ":" in command_sent:
         try:
@@ -362,6 +364,17 @@ def _sensio_fs_from_command(command_sent: str, default_fs: float = 100.0) -> flo
         except ValueError:
             pass
     return default_fs
+
+
+# Backward-compatible aliases. This source was originally named after the
+# device's own Bluetooth identifier ("SeNSiO") while every external name in
+# the repo already used the study name ("prorhythm"): data/raw/prorhythm/,
+# batch_prorhythm_report.py, prorhythm_run_manifest.csv. The rename settles
+# on "prorhythm" everywhere. These aliases stay because parse_sensio_ecg is
+# in ecg_inference.__all__ and training/ecg_pipeline_tools.py imports it --
+# removing them outright would break callers this rename did not touch.
+parse_sensio_ecg = parse_prorhythm_ecg
+_sensio_fs_from_command = _prorhythm_fs_from_command
 
 
 def parse_wfdb_record(record_path: Path, ann_extension: Optional[str] = "atr") -> Recording:
@@ -401,7 +414,7 @@ def discover_vitalpatch_files(root: Path) -> list[Path]:
     return sorted(root.glob("Patch_*/*_ecg.csv"))
 
 
-def discover_sensio_files(root: Path) -> list[Path]:
+def discover_prorhythm_files(root: Path) -> list[Path]:
     return sorted(root.glob("ECG_*.csv"))
 
 
@@ -506,7 +519,7 @@ def _morphology_kurtosis(x: np.ndarray) -> float:
     has the sharp/peaky character of real QRS complexes.
 
     Caller passes a copy already band-limited to the physiological ECG band
-    (see evaluate_window) rather than the fully raw window — on SeNSiO's raw
+    (see evaluate_window) rather than the fully raw window — on ProRhythm's raw
     "ECG" channel, a dominant near-Nyquist artifact (more spectral power
     above 40Hz than below, confirmed by FFT) swamps the raw amplitude
     distribution and reads as kurtosis ~ -1 (near-uniform) even when real
@@ -581,7 +594,7 @@ def evaluate_window(x: np.ndarray, t_ms: np.ndarray, fs: float,
 
     # snr_db's "noise" is literally everything outside 0.5-40Hz, i.e. a
     # sliver from bandpass_high_hz up to this window's own Nyquist. For a
-    # native rate close to 2x bandpass_high_hz (SeNSiO's 100Hz -> Nyquist
+    # native rate close to 2x bandpass_high_hz (ProRhythm's 100Hz -> Nyquist
     # 50Hz) that sliver is only a few Hz wide and sits exactly where the
     # mains notch (50Hz) is mathematically invalid (powerline_notch()
     # no-ops once notch_hz >= Nyquist) -- so any near-Nyquist artifact in
@@ -729,7 +742,7 @@ def to_target_rate(signal: np.ndarray, timestamps_ms: np.ndarray, fs_nominal: fl
                     target_fs: float = TARGET_FS) -> tuple[np.ndarray, np.ndarray]:
     """Dispatch: decimate when downsampling from a clean integer-ratio
     source (WFDB-style fixed fs), otherwise linear-interpolate irregular
-    wearable timestamps (VitalPatch/SeNSiO).
+    wearable timestamps (VitalPatch/ProRhythm).
     """
     if abs(fs_nominal - target_fs) < 1e-6:
         return signal, timestamps_ms
@@ -869,3 +882,6 @@ def apply_filter_chain(x: np.ndarray, fs: float, already_bandpass_filtered: bool
     return x
 
 
+# Defined at end of module: discover_prorhythm_files appears after the
+# parser block above, so this alias cannot sit with the others.
+discover_sensio_files = discover_prorhythm_files

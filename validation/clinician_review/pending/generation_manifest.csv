@@ -1,0 +1,37 @@
+source,patient_id,segment_id,fs_nominal,time_retention_pct,status,n_beats,n_pages,label_dist,pdf,reason
+vitalpatch,183594,1778744267337_VC2B008BF_183594_ecg_seg0,125.0,100.0,OK,184,5,"{""N"": 175, ""Q"": 2, ""S"": 5, ""V"": 2}",annotation/reviews/vitalpatch/Patch_183594/1778744267337_VC2B008BF_183594_ecg_seg0.pdf,
+vitalpatch,183594,1778971235311_VC2B008BF_183594_ecg_seg0,125.0,100.0,OK,257,5,"{""N"": 251, ""Q"": 1, ""S"": 5}",annotation/reviews/vitalpatch/Patch_183594/1778971235311_VC2B008BF_183594_ecg_seg0.pdf,
+vitalpatch,183594,1779192456847_VC2B008BF_183594_ecg_seg0,125.0,100.0,OK,185,5,"{""N"": 180, ""Q"": 1, ""S"": 3, ""V"": 1}",annotation/reviews/vitalpatch/Patch_183594/1779192456847_VC2B008BF_183594_ecg_seg0.pdf,
+vitalpatch,1844AC,1778184448928_VC2B008BF_1844AC_ecg_seg0,125.0,100.0,OK,154,5,"{""N"": 149, ""Q"": 1, ""V"": 4}",annotation/reviews/vitalpatch/Patch_1844AC/1778184448928_VC2B008BF_1844AC_ecg_seg0.pdf,
+vitalpatch,1844AC,1778485492126_VC2B008BF_1844AC_ecg_seg0,125.0,100.0,OK,148,5,"{""N"": 140, ""Q"": 1, ""S"": 2, ""V"": 5}",annotation/reviews/vitalpatch/Patch_1844AC/1778485492126_VC2B008BF_1844AC_ecg_seg0.pdf,
+vitalpatch,1844AC,1778785637110_VC2B008BF_1844AC_ecg_seg0,125.0,100.0,OK,178,5,"{""N"": 175, ""Q"": 2, ""S"": 1}",annotation/reviews/vitalpatch/Patch_1844AC/1778785637110_VC2B008BF_1844AC_ecg_seg0.pdf,
+vitalpatch,184635,1779910877851_VC2B008BF_184635_ecg_seg0,125.0,100.0,OK,35,5,"{""N"": 34, ""Q"": 1}",annotation/reviews/vitalpatch/Patch_184635/1779910877851_VC2B008BF_184635_ecg_seg0.pdf,
+vitalpatch,184635,1780210223300_VC2B008BF_184635_ecg_seg0,125.0,100.0,OK,93,5,"{""N"": 87, ""S"": 5, ""V"": 1}",annotation/reviews/vitalpatch/Patch_184635/1780210223300_VC2B008BF_184635_ecg_seg0.pdf,
+vitalpatch,184635,1780500753476_VC2B008BF_184635_ecg_seg0,125.0,100.0,OK,157,5,"{""N"": 152, ""Q"": 1, ""S"": 4}",annotation/reviews/vitalpatch/Patch_184635/1780500753476_VC2B008BF_184635_ecg_seg0.pdf,
+vitalpatch,1849DF,1779292151158_VC2B008BF_1849DF_ecg_seg0,125.0,100.0,OK,157,5,"{""N"": 154, ""S"": 1, ""V"": 2}",annotation/reviews/vitalpatch/Patch_1849DF/1779292151158_VC2B008BF_1849DF_ecg_seg0.pdf,
+vitalpatch,1849DF,1779592314457_VC2B008BF_1849DF_ecg_seg0,125.0,100.0,OK,101,5,"{""N"": 101}",annotation/reviews/vitalpatch/Patch_1849DF/1779592314457_VC2B008BF_1849DF_ecg_seg0.pdf,
+vitalpatch,1849DF,1779894426190_VC2B008BF_1849DF_ecg_seg0,125.0,100.0,OK,169,5,"{""N"": 166, ""S"": 3}",annotation/reviews/vitalpatch/Patch_1849DF/1779894426190_VC2B008BF_1849DF_ecg_seg0.pdf,
+vitalpatch,184B27,1779985134136_VC2B008BF_184B27_ecg_seg0,125.0,100.0,OK,76,5,"{""N"": 47, ""S"": 29}",annotation/reviews/vitalpatch/Patch_184B27/1779985134136_VC2B008BF_184B27_ecg_seg0.pdf,
+vitalpatch,184B27,1780110624672_VC2B008BF_184B27_ecg_seg0,125.0,100.0,OK,44,5,"{""N"": 39, ""Q"": 1, ""S"": 4}",annotation/reviews/vitalpatch/Patch_184B27/1780110624672_VC2B008BF_184B27_ecg_seg0.pdf,
+vitalpatch,184B27,1780229914276_VC2B008BF_184B27_ecg_seg0,125.0,100.0,SKIPPED_NO_BEATS,0,,,,no beats detected after quality gating
+vitalpatch,184B2F,1778326595043_VC2B008BF_184B2F_ecg_seg0,125.0,100.0,OK,38,5,"{""N"": 32, ""Q"": 1, ""S"": 2, ""V"": 3}",annotation/reviews/vitalpatch/Patch_184B2F/1778326595043_VC2B008BF_184B2F_ecg_seg0.pdf,
+vitalpatch,184B2F,1778614314106_VC2B008BF_184B2F_ecg_seg0,125.0,100.0,SKIPPED_NO_BEATS,0,,,,no beats detected after quality gating
+vitalpatch,184B2F,1778928712653_VC2B008BF_184B2F_ecg_seg0,125.0,100.0,OK,38,5,"{""N"": 32, ""Q"": 5, ""S"": 1}",annotation/reviews/vitalpatch/Patch_184B2F/1778928712653_VC2B008BF_184B2F_ecg_seg0.pdf,
+prorhythm,FD:DC:A1:9C:48:40,ECG_2026-07-07T12-21-26.317821,100.0,75.5,SKIPPED_TIME_AXIS_COLLAPSED,0,,,,only 75.5% of the recording span survives resampling; strips would splice non-contiguous time
+prorhythm,FD:DC:A1:9C:48:40,ECG_2026-07-07T12-21-42.647304,100.0,16.5,SKIPPED_TIME_AXIS_COLLAPSED,0,,,,only 16.5% of the recording span survives resampling; strips would splice non-contiguous time
+prorhythm,FD:DC:A1:9C:48:40,ECG_2026-07-07T12-22-01.962327,100.0,0.0,SKIPPED_TIME_AXIS_COLLAPSED,0,,,,only 0.0% of the recording span survives resampling; strips would splice non-contiguous time
+prorhythm,FD:DC:A1:9C:48:40,ECG_2026-07-07T12-22-08.159197,100.0,0.0,SKIPPED_TIME_AXIS_COLLAPSED,0,,,,only 0.0% of the recording span survives resampling; strips would splice non-contiguous time
+prorhythm,FD:DC:A1:9C:48:40,ECG_2026-07-07T12-22-19.983769,100.0,5.2,SKIPPED_TIME_AXIS_COLLAPSED,0,,,,only 5.2% of the recording span survives resampling; strips would splice non-contiguous time
+prorhythm,FD:DC:A1:9C:48:40,ECG_2026-07-07T12-22-28.023373,100.0,0.0,SKIPPED_TIME_AXIS_COLLAPSED,0,,,,only 0.0% of the recording span survives resampling; strips would splice non-contiguous time
+prorhythm,FD:DC:A1:9C:48:40,ECG_2026-07-07T12-22-34.504133,100.0,55.7,SKIPPED_TIME_AXIS_COLLAPSED,0,,,,only 55.7% of the recording span survives resampling; strips would splice non-contiguous time
+prorhythm,FD:DC:A1:9C:48:40,ECG_2026-07-07T12-22-45.403985,100.0,0.0,SKIPPED_TIME_AXIS_COLLAPSED,0,,,,only 0.0% of the recording span survives resampling; strips would splice non-contiguous time
+prorhythm,FD:DC:A1:9C:48:40,ECG_2026-07-07T12-22-53.380933,100.0,96.8,OK,1356,5,"{""N"": 937, ""Q"": 182, ""S"": 98, ""V"": 139}",annotation/reviews/prorhythm/FD_DC_A1_9C_48_40/ECG_2026-07-07T12-22-53.380933.pdf,
+prorhythm,FD:DC:A1:9C:48:40,ECG_Filtered_2026-07-07T12-23-54.443541,100.0,80.9,SKIPPED_TIME_AXIS_COLLAPSED,0,,,,only 80.9% of the recording span survives resampling; strips would splice non-contiguous time
+prorhythm,FD:DC:A1:9C:48:40,ECG_Filtered_2026-07-07T12-23-59.732540,100.0,16.5,SKIPPED_TIME_AXIS_COLLAPSED,0,,,,only 16.5% of the recording span survives resampling; strips would splice non-contiguous time
+prorhythm,FD:DC:A1:9C:48:40,ECG_Filtered_2026-07-07T12-24-05.551334,100.0,35.4,SKIPPED_TIME_AXIS_COLLAPSED,0,,,,only 35.4% of the recording span survives resampling; strips would splice non-contiguous time
+prorhythm,FD:DC:A1:9C:48:40,ECG_Filtered_2026-07-07T12-24-10.747727,100.0,22.5,SKIPPED_TIME_AXIS_COLLAPSED,0,,,,only 22.5% of the recording span survives resampling; strips would splice non-contiguous time
+prorhythm,FD:DC:A1:9C:48:40,ECG_Filtered_2026-07-07T12-24-16.795047,100.0,5.2,SKIPPED_TIME_AXIS_COLLAPSED,0,,,,only 5.2% of the recording span survives resampling; strips would splice non-contiguous time
+prorhythm,FD:DC:A1:9C:48:40,ECG_Filtered_2026-07-07T12-24-22.647079,100.0,38.1,SKIPPED_TIME_AXIS_COLLAPSED,0,,,,only 38.1% of the recording span survives resampling; strips would splice non-contiguous time
+prorhythm,FD:DC:A1:9C:48:40,ECG_Filtered_2026-07-07T12-24-29.747583,100.0,5.1,SKIPPED_TIME_AXIS_COLLAPSED,0,,,,only 5.1% of the recording span survives resampling; strips would splice non-contiguous time
+prorhythm,FD:DC:A1:9C:48:40,ECG_Filtered_2026-07-07T12-24-38.531088,100.0,0.0,SKIPPED_TIME_AXIS_COLLAPSED,0,,,,only 0.0% of the recording span survives resampling; strips would splice non-contiguous time
+prorhythm,FD:DC:A1:9C:48:40,ECG_Filtered_2026-07-07T12-24-46.006785,100.0,96.0,OK,1123,5,"{""N"": 599, ""Q"": 307, ""S"": 42, ""V"": 175}",annotation/reviews/prorhythm/FD_DC_A1_9C_48_40/ECG_Filtered_2026-07-07T12-24-46.006785.pdf,

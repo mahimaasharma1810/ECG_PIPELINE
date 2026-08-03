@@ -12,7 +12,7 @@ from __future__ import annotations
 from .preprocess import (
     Recording,
     parse_vitalpatch_ecg,
-    parse_sensio_ecg,
+    parse_prorhythm_ecg,
     parse_wfdb_record,
     TARGET_FS,
 )
@@ -24,7 +24,7 @@ from .report import load_classifier, build_risk_report_json, render_narrative, s
 __all__ = [
     "Recording",
     "parse_vitalpatch_ecg",
-    "parse_sensio_ecg",
+    "parse_prorhythm_ecg",
     "parse_wfdb_record",
     "TARGET_FS",
     "Beat",

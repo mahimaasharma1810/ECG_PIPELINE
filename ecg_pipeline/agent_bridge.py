@@ -39,6 +39,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
 import requests
 
 from ecg_pipeline.ecg_pipeline_core import (
@@ -183,7 +184,7 @@ def _build_vitals_index(patient_dir: Path) -> list[tuple[int, int, "int | None",
     100% overall (verified: min/max coverage 100.0% on every one of the 6
     patients, including Patch_184B2F, where independently-tracked expected
     coverage after this fix is ~85%, i.e. some real gaps). first/last row
-    reproduced the expected per-patient coverage (Docs/HANDOFF.md's "after the
+    reproduced the expected per-patient coverage (docs/HANDOFF.md's "after the
     fix" column, measured to within ~0.6 points on every patient); min/max did
     not. So first/last row is used, even though it is very slightly stricter.
 
@@ -589,21 +590,29 @@ def submit_to_agent(patient_id: str, vitals_values: dict, ecg_risk: dict,
 # source of truth.
 # ============================================================================
 
-# Reporting-layer calibration notes only, from Docs/BEAT_CLASSIFICATION_SUMMARY.md
-# DS2 (held-out, 22-patient) numbers for the current production model
-# (five_class_xgb.json). Not used by the classifier or cascade -- purely to
-# render an honest confidence caveat alongside beat counts.
+# Reporting-layer calibration notes only, from docs/CLASSIFIER_EVAL_MITDB_SVDB_2026-08-03.md
+# DS2 (held-out, 22-patient, 45,881 beats) numbers for the current production
+# model (five_class_xgb.json), recomputed 2026-08-03 under current code. Not
+# used by the classifier or cascade -- purely to render an honest confidence
+# caveat alongside beat counts. The model file is unchanged since these were
+# first published; the small shifts come from feature-path changes in
+# segment_beats/to_target_rate/robust_zscore, so re-run eval-classifier and
+# update here whenever that path changes, not only on a retrain.
+# Kept byte-identical to ecg_inference/report.py's copy -- the two packages
+# carry independent duplicates of this table.
 CLASS_CONFIDENCE_NOTES = {
     "N": {"confidence": "HIGH",
           "note": "Majority class; reliable in practice though not broken out separately in the DS2 macro-F1 table."},
     "S": {"confidence": "LOW",
-          "note": "DS2 held-out F1 = 0.139 (production five_class_xgb.json). Frequent S<->N confusion -- "
-                  "treat S counts as a screening signal, not a diagnosis."},
+          "note": "DS2 held-out F1 = 0.152 (production five_class_xgb.json). Frequent S<->N confusion -- "
+                  "65% of true S beats are classified N. Treat S counts as a screening signal, "
+                  "not a diagnosis."},
     "V": {"confidence": "MODERATE-HIGH",
-          "note": "DS2 held-out F1 = 0.826 (production five_class_xgb.json). The most reliable class this "
-                  "model produces."},
+          "note": "DS2 held-out F1 = 0.830 (production five_class_xgb.json). The most reliable class this "
+                  "model produces on MIT-BIH. Note V precision falls to 0.377 on an unseen database "
+                  "(SVDB), so this figure may not transfer to other recording populations."},
     "F": {"confidence": "LOW",
-          "note": "DS2 held-out F1 = 0.011 (production five_class_xgb.json). Essentially unsolved -- any F "
+          "note": "DS2 held-out F1 = 0.005 (production five_class_xgb.json). Essentially unsolved -- any F "
                   "count should be treated as noise, not a finding."},
     "Q": {"confidence": "N/A",
           "note": "Assigned to beats rejected by the deterministic quality gate, not predicted by the classifier."},
@@ -618,6 +627,23 @@ def _get_audit_payload(audit: AuditLog, event_type: str) -> dict | None:
 
 
 def _beat_summary(result: PipelineResult) -> dict:
+    """Per-class beat counts and their share of the recording.
+
+    The percentage denominator is `len(beat_labels)` = every DETECTED beat,
+    including the quality-rejected ones labeled "Q". The field is named
+    `pct_of_detected_beats` to say so. It was previously called
+    `pct_of_analyzed_beats` while using this same denominator, which produced the
+    self-contradictory line "Q: 8 beats (6.3% of analyzed beats)" -- Q beats are by
+    definition the ones NOT analyzed.
+
+    The denominator was deliberately NOT changed to n_beats_analyzed to fix this.
+    score_recording() computes pvc_burden_pct/pac_burden_pct over this same
+    all-detected denominator, so switching only this display field would have made
+    the beat summary disagree with the rule trace on the same recording (V would
+    read 31.93% here vs the deciding rule's 29.921%) -- swapping a labelling bug for
+    a numeric contradiction between two halves of one report. One number, honestly
+    named.
+    """
     labels = result.beat_labels
     n = len(labels)
     summary = {}
@@ -625,10 +651,23 @@ def _beat_summary(result: PipelineResult) -> dict:
         count = labels.count(c)
         summary[c] = {
             "count": count,
-            "pct_of_analyzed_beats": round(100.0 * count / n, 2) if n else 0.0,
+            "pct_of_detected_beats": round(100.0 * count / n, 2) if n else 0.0,
             **CLASS_CONFIDENCE_NOTES[c],
         }
     return summary
+
+
+def beat_summary_pct(info: dict) -> float:
+    """Reads the per-class percentage from a beat_summary entry.
+
+    Accepts both the current `pct_of_detected_beats` key and the legacy
+    `pct_of_analyzed_beats` one, so the thousands of already-saved report JSONs
+    under data/reports/ stay readable by the UI/summary tools without being
+    regenerated. Same number either way -- only the name changed.
+    """
+    if "pct_of_detected_beats" in info:
+        return info["pct_of_detected_beats"]
+    return info.get("pct_of_analyzed_beats", 0.0)
 
 
 def _rhythm_findings_json(result: PipelineResult) -> list[dict]:
@@ -662,8 +701,16 @@ def _rhythm_findings_json(result: PipelineResult) -> list[dict]:
             raised_risk = burden_pct > burden_thresh
             effect = ("this crosses the burden threshold and raises risk to HIGH." if raised_risk else
                       "flagged for clinician review; on its own, one flagged window does not raise the risk level.")
+            # Threshold and window come from the finding itself (set by
+            # _afib_suspected), falling back to RISK only for findings produced by an
+            # older run that predates those keys. NEVER hardcode a literal here: this
+            # text said "> 0.15" for the whole period after the detector was validated
+            # down to 0.10, showing clinicians a decision boundary the code didn't use.
+            cv_thresh = f.detail.get("rr_cv_threshold", RISK.afib_rr_cv_threshold)
+            win_beats = f.detail.get("window_beats", RISK.afib_rr_window_beats)
             evidence_text = (
-                f"RR coefficient-of-variation {f.detail['rr_cv']:.3f} > 0.15 over a 20-beat rolling window "
+                f"RR coefficient-of-variation {f.detail['rr_cv']:.3f} > {cv_thresh:.2f} "
+                f"over a {win_beats}-beat rolling window "
                 f"(beats {f.start_beat_idx}-{f.end_beat_idx}, t={t0}-{t1}s). "
                 f"AFib burden this recording: {burden_pct:.1f}% of examined rolling windows "
                 f"(risk-raising threshold: >{burden_thresh:.1f}%) -- {effect}"
@@ -811,12 +858,12 @@ def _confidence_statement(deciding_rule: dict) -> dict:
     if depends_on_s_or_f:
         tier = "LOW"
         statement = ("The deciding rule depends on S (supraventricular) beat counts. The production "
-                      "classifier's held-out S-class F1 is 0.139 -- this level should be treated as a "
+                      "classifier's held-out S-class F1 is 0.152 -- this level should be treated as a "
                       "screening flag, not a reliable diagnosis, until confirmed by clinician review.")
     elif "VT run" in deciding_rule["condition"] or "PVC" in deciding_rule["condition"]:
         tier = "MODERATE-HIGH"
         statement = ("The deciding rule depends on V (ventricular) beat counts. The production classifier's "
-                      "held-out V-class F1 is 0.826 -- the most reliable class this model produces, though "
+                      "held-out V-class F1 is 0.830 -- the most reliable class this model produces, though "
                       "still not a clinical-grade guarantee.")
     elif "HRV" in deciding_rule["condition"] or "SDNN" in deciding_rule["condition"]:
         tier = "MODERATE"
@@ -832,7 +879,7 @@ def _confidence_statement(deciding_rule: dict) -> dict:
     else:
         tier = "BASELINE"
         statement = ("No threshold was exceeded (LOW). Because the S and F classes are the model's weakest "
-                      "(held-out F1 0.139 and 0.011), a LOW read here does not rule out under-counted S/F "
+                      "(held-out F1 0.152 and 0.005), a LOW read here does not rule out under-counted S/F "
                       "events -- it reliably rules out V-burden, VT runs, and HRV suppression, which this "
                       "model detects well.")
     return {
@@ -852,15 +899,86 @@ def _safety_overrides_json(risk_report: RiskReport, rule_trace: list[dict]) -> l
         if not rule.get("evaluated", True):
             overrides.append({"override": name, "applied": False,
                                "note": f"No {name} score was supplied to this run -- override not evaluated. "
-                                       f"This bridge is ECG-only; vitals/NEWS2/qSOFA pairing is a separate, "
-                                       f"open integration question (see project memory)."})
+                                       f"This run was ECG-only. It does NOT mean no vitals exist for this "
+                                       f"segment: pass vitals_root to run_full_report() to match real vitals "
+                                       f"and have this override evaluated. See the report's `vitals` block."})
         else:
             overrides.append({"override": name, "score": rule["measured_value"], "threshold": rule["threshold"],
                                "applied": rule["fired"]})
     return overrides
 
 
-def build_risk_report_json(result: PipelineResult) -> dict:
+# Fraction of RR intervals that may be flagged before the derived heart rate is
+# considered unreliable. Not clinically validated -- a reporting guardrail, chosen
+# because the segment that motivated this field (184B27 seg1) had 20/126 = 15.9%
+# flagged and was already badly wrong, so the bar sits just above that.
+HR_FLAGGED_FRACTION_WARN = 0.20
+# A derived-vs-measured heart-rate gap at or above this many bpm is surfaced as a
+# warning. Matches the cross-check tolerance used in the diagnostic reports.
+HR_VITALS_GAP_WARN_BPM = 5.0
+
+
+def derive_heart_rate(beats: list, vitals_hr: float | None = None) -> dict:
+    """Heart rate from the RR-interval series, as MEDIAN of NON-FLAGGED intervals.
+
+    Deliberately not the mean of all RR intervals. On a segment where the SQI gate
+    discards part of the recording, the surviving RR series contains multi-second
+    "intervals" that are really missed-beat gaps across the discarded stretch, not
+    slow beating. Measured on 184B27 segment 1 (39% of windows SQI-rejected, five
+    gaps of 5.3-7.8 s): mean-of-all-RR gives 80.1 bpm and beats/duration gives 66.0
+    bpm, against a device-measured 115.8 bpm -- errors of 36 and 50 bpm. Median of
+    the 106 non-flagged intervals gives 118.1 bpm, within 2.3 bpm of the device.
+    The median is used rather than the mean of the same non-flagged subset (110.7
+    bpm, still 5.1 bpm off) because it is additionally robust to the ectopic
+    short-long RR pairs that dominate a high-PVC-burden recording.
+
+    Returns value None (never a sentinel number) when there are no usable
+    intervals. `heart_rate_warning` is None when nothing is suspect, else a string
+    naming what is wrong -- an explicitly absent warning, not a silent pass.
+    """
+    rr_all = [b.rr_post_ms for b in beats if b.rr_post_ms is not None]
+    rr_ok = [b.rr_post_ms for b in beats
+             if b.rr_post_ms is not None and not b.rr_flagged and b.rr_post_ms > 0]
+
+    n_all, n_ok = len(rr_all), len(rr_ok)
+    flagged_frac = (n_all - n_ok) / n_all if n_all else 0.0
+
+    if not rr_ok:
+        return {
+            "heart_rate_bpm": None,
+            "heart_rate_method": "median_nonflagged_rr",
+            "heart_rate_n_intervals": 0,
+            "heart_rate_n_intervals_total": n_all,
+            "heart_rate_flagged_fraction": round(flagged_frac, 4) if n_all else None,
+            "heart_rate_warning": ("No non-flagged RR intervals -- heart rate not derivable "
+                                    "from this segment."),
+        }
+
+    hr = 60000.0 / float(np.median(rr_ok))
+
+    warnings = []
+    if flagged_frac > HR_FLAGGED_FRACTION_WARN:
+        warnings.append(
+            f"{flagged_frac * 100:.1f}% of RR intervals were flagged out-of-range "
+            f"(> {HR_FLAGGED_FRACTION_WARN * 100:.0f}%); derived HR rests on "
+            f"{n_ok} of {n_all} intervals and the recording likely has detection gaps")
+    if vitals_hr is not None and abs(hr - vitals_hr) >= HR_VITALS_GAP_WARN_BPM:
+        warnings.append(
+            f"derived HR {hr:.1f} bpm differs from device-measured HR {vitals_hr:.1f} bpm "
+            f"by {abs(hr - vitals_hr):.1f} bpm (>= {HR_VITALS_GAP_WARN_BPM:.0f} bpm)")
+
+    return {
+        "heart_rate_bpm": round(hr, 1),
+        "heart_rate_method": "median_nonflagged_rr",
+        "heart_rate_n_intervals": n_ok,
+        "heart_rate_n_intervals_total": n_all,
+        "heart_rate_flagged_fraction": round(flagged_frac, 4),
+        "heart_rate_warning": "; ".join(warnings) if warnings else None,
+    }
+
+
+def build_risk_report_json(result: PipelineResult, vitals_hr: float | None = None,
+                            classifier: FiveClassBeatClassifier | None = None) -> dict:
     r = result.recording
     duration_s = (float(r.timestamps_ms[-1] - r.timestamps_ms[0]) / 1000.0) if len(r.timestamps_ms) > 1 else 0.0
     n_quality_rejected_beats = sum(1 for b in result.beats if b.quality_rejected)
@@ -887,8 +1005,10 @@ def build_risk_report_json(result: PipelineResult) -> dict:
             "n_beats_detected": len(result.beats),
             "n_beats_analyzed": n_beats_analyzed,
             "n_beats_flagged_low_quality": n_quality_rejected_beats,
+            **derive_heart_rate(result.beats, vitals_hr=vitals_hr),
         },
         "beat_summary": _beat_summary(result),
+        "beat_confidence": _beat_confidence_json(result, classifier),
         "rhythm_findings": _rhythm_findings_json(result),
         "assessable": assessable,
         "risk_level": risk_level,
@@ -898,10 +1018,14 @@ def build_risk_report_json(result: PipelineResult) -> dict:
         "safety_overrides": _safety_overrides_json(result.risk_report, rule_trace),
         "known_limitations": [
             "Beat classifier is the frozen production XGBoost model (five_class_xgb.json). DS2 held-out "
-            "per-class F1: V=0.826 (reliable), S=0.139 (LOW-CONFIDENCE), F=0.011 (LOW-CONFIDENCE, essentially "
+            "per-class F1: V=0.830 (reliable), S=0.152 (LOW-CONFIDENCE), F=0.005 (LOW-CONFIDENCE, essentially "
             "unsolved). Any finding driven primarily by S or F counts is a screening flag, not a diagnosis.",
-            "NEWS2/qSOFA vitals pairing is not wired into this ECG-only bridge -- safety_overrides above are "
-            "reported as not-evaluated rather than fabricated.",
+            ("NEWS2 is scored from only the components VitalPatch measures (HR, respiratory rate, skin "
+             "temperature). SpO2, blood pressure and consciousness are not measurable on this hardware, "
+             "contribute 0, and are listed in missing_components -- the total is a LOWER BOUND, not a "
+             "complete NEWS2. qSOFA is a 1-of-3-criteria proxy whose maximum value is 1, below its own "
+             "threshold of 2, so it can never fire on device data alone. When no vitals were matched, "
+             "safety_overrides are reported as not-evaluated rather than fabricated."),
         ],
     }
 
@@ -1056,8 +1180,8 @@ def _render_beat_summary_block(beat_summary: dict) -> str:
     lines = []
     for cls, info in beat_summary.items():
         caveat = f" [{info['confidence']} CONFIDENCE -- {info['note']}]" if info.get("confidence") == "LOW" else ""
-        lines.append(f"- {cls}: {info['count']} beats ({_fmt_num(info['pct_of_analyzed_beats'])}% "
-                      f"of analyzed beats){caveat}")
+        lines.append(f"- {cls}: {info['count']} beats ({_fmt_num(beat_summary_pct(info))}% "
+                      f"of detected beats){caveat}")
     return "\n".join(lines) if lines else "(no beats survived quality gating)"
 
 
@@ -1222,13 +1346,241 @@ def _compose_structured_narrative(report_json: dict, llm_narrative: str) -> str:
     return "\n\n".join(parts)
 
 
-def run_full_report(recording: Recording, classifier: FiveClassBeatClassifier) -> tuple[dict, PipelineResult]:
+# How many of the least-confident beats get a SHAP explanation in the report.
+LOW_CONFIDENCE_EXPLAIN_N = 5
+
+
+def _beat_confidence_json(result: PipelineResult,
+                           classifier: FiveClassBeatClassifier | None = None,
+                           explain_n: int = LOW_CONFIDENCE_EXPLAIN_N) -> dict:
+    """Per-class confidence stats plus the least-confident beats, each with SHAP
+    attributions for why the model chose that class.
+
+    This exists because a beat count alone cannot be reviewed. A report saying "38
+    V beats" gives a clinician no way to judge whether the deciding rule rests on
+    solid predictions or on coin-flips. The distribution shows how much of the
+    burden is confidently classified, and the SHAP block shows which features drove
+    the weakest calls.
+
+    SHAP explains the MODEL, not the physiology: it says what moved this
+    classifier, not that the classifier was right. With no clinician-annotated
+    VitalPatch labels in existence, correctness remains unestablished.
+    """
+    labels = result.beat_labels
+    confs = result.beat_confidences or []
+    fvs = result.beat_feature_vectors or []
+    if not confs:
+        return {"available": False,
+                "reason": "per-beat confidences not recorded by this pipeline run"}
+
+    per_class: dict[str, dict] = {}
+    for c in AAMI_CLASSES:
+        vals = [cf for lb, cf in zip(labels, confs) if lb == c and cf is not None]
+        per_class[c] = {
+            "count": labels.count(c),
+            "n_with_confidence": len(vals),
+            "mean_confidence": round(float(np.mean(vals)), 4) if vals else None,
+            "min_confidence": round(float(min(vals)), 4) if vals else None,
+            "max_confidence": round(float(max(vals)), 4) if vals else None,
+        }
+
+    scored = [(i, cf) for i, cf in enumerate(confs) if cf is not None]
+    all_vals = [cf for _, cf in scored]
+    lowest = sorted(scored, key=lambda t: t[1])[:explain_n]
+
+    beats_out = []
+    for i, cf in lowest:
+        entry = {
+            "beat_index": i,
+            "timestamp_s": round(result.beats[i].r_peak_ms / 1000.0, 3),
+            "predicted_class": labels[i],
+            "confidence": round(float(cf), 4),
+            "neighbors": {
+                "prev": labels[i - 1] if i > 0 else None,
+                "next": labels[i + 1] if i < len(labels) - 1 else None,
+            },
+        }
+        if classifier is not None and i < len(fvs):
+            entry["shap"] = classifier.explain(fvs[i], labels[i])
+        beats_out.append(entry)
+
+    return {
+        "available": True,
+        "n_classified": len(scored),
+        "mean_confidence": round(float(np.mean(all_vals)), 4) if all_vals else None,
+        "median_confidence": round(float(np.median(all_vals)), 4) if all_vals else None,
+        "n_at_or_above_0_95": sum(1 for v in all_vals if v >= 0.95),
+        "n_below_0_70": sum(1 for v in all_vals if v < 0.70),
+        "per_class": per_class,
+        "lowest_confidence_beats": beats_out,
+        "note": ("SHAP values are exact TreeSHAP from the production XGBoost model, in "
+                  "margin (log-odds) space. They explain what drove THIS model's choice; "
+                  "they are not evidence the choice is clinically correct. No "
+                  "clinician-annotated VitalPatch labels exist to establish that."),
+    }
+
+
+def _vitals_json(vitals: dict | None, news2: dict | None, qsofa: dict | None,
+                  vitals_root: "str | Path | None") -> dict:
+    """The report's `vitals` block: what was matched, what was scored, and -- just
+    as important -- what was NOT available and why.
+
+    Every component that could not be measured is reported with an explicit
+    `value: None` plus a `reason`, never as a 0 that reads like a normal
+    measurement. Three states are distinguished rather than collapsed:
+      * vitals_root not supplied  -> "not_requested" (ECG-only run, by choice)
+      * supplied but nothing matched -> "no_vitals_matched" (real coverage gap)
+      * matched -> per-component values, with per-component availability
+    """
+    if vitals_root is None:
+        return {"status": "not_requested",
+                "note": ("Run was ECG-only: no vitals root supplied, so NEWS2/qSOFA "
+                          "were not evaluated. This is not a statement that vitals "
+                          "are unavailable for this segment.")}
+    if vitals is None:
+        return {"status": "no_vitals_matched",
+                "note": ("No vitals file matched this segment within "
+                          f"{VITALS_MAX_AGE_MS // 60000} minutes. NEWS2/qSOFA not "
+                          "evaluated; no values were assumed.")}
+
+    def component(key: str, score: int | None) -> dict:
+        v = vitals.get(key) or {}
+        available = v.get("value") is not None
+        out = {"value": v.get("value"), "score": score if available else None,
+               "available": available,
+               "source": v.get("source") if available else "NOT_AVAILABLE"}
+        if not available:
+            out["reason"] = v.get("note") or "no valid readings in matched vitals file"
+        if v.get("n_readings") is not None:
+            out["n_readings"] = v["n_readings"]
+        return out
+
+    c = news2["components"] if news2 else {}
+    components = {
+        "heart_rate": component("hr", c.get("hr_score")),
+        "respiratory_rate": component("respiratory_rate", c.get("rr_score")),
+        "temperature": component("temperature", c.get("temp_score")),
+        "spo2": component("spo2", None),
+        "systolic_bp": component("sbp", None),
+        "consciousness": {"value": None, "score": None, "available": False,
+                           "source": "NOT_AVAILABLE",
+                           "reason": "AVPU/consciousness has no input path on this device"},
+    }
+    n_avail = sum(1 for x in components.values() if x["available"])
+
+    return {
+        "status": "matched",
+        "vitals_file": vitals.get("vitals_file"),
+        "match_method": vitals.get("vitals_match_method"),
+        "time_offset_ms": vitals.get("vitals_time_offset_ms"),
+        "time_offset_minutes": (round(abs(vitals["vitals_time_offset_ms"]) / 60000.0, 2)
+                                 if vitals.get("vitals_time_offset_ms") is not None else None),
+        "posture": (vitals.get("posture") or {}).get("most_common"),
+        "news2": {
+            "total_score": news2["partial_news2_score"] if news2 else None,
+            "components_available": n_avail,
+            "components_total": len(components),
+            "incomplete": n_avail < len(components),
+            "components": components,
+            "missing_components": news2["missing_components"] if news2 else None,
+            "coverage": news2["coverage"] if news2 else None,
+            "caveat": news2["caveat"] if news2 else None,
+            "note": (f"Score based on {n_avail} of {len(components)} components. "
+                      f"Missing: {', '.join(k for k, v in components.items() if not v['available']) or 'none'}. "
+                      "Unavailable components contribute 0 and are listed, not imputed -- "
+                      "the total is a LOWER BOUND, not a complete NEWS2."),
+        },
+        "qsofa": {
+            "total_score": qsofa["qsofa_proxy_score"] if qsofa else None,
+            "components_available": 1 if qsofa else 0,
+            "components_total": 3,
+            "incomplete": True,
+            "components": {
+                "heart_rate_elevated": {"value": qsofa["hr_flag"] if qsofa else None,
+                                         "score": qsofa["qsofa_proxy_score"] if qsofa else None,
+                                         "hr": qsofa["hr_value"] if qsofa else None,
+                                         "available": True,
+                                         "note": ("HR > 90 is this codebase's cardiovascular proxy; it is "
+                                                   "NOT one of the three published qSOFA criteria")},
+                "altered_mentation": {"value": None, "score": None, "available": False,
+                                       "source": "NOT_AVAILABLE",
+                                       "reason": "GCS/AVPU has no input path on this device"},
+                "systolic_bp_low": {"value": None, "score": None, "available": False,
+                                     "source": "NOT_AVAILABLE",
+                                     "reason": (qsofa["sbp_note"] if qsofa
+                                                 else "VitalPatch has no BP sensor")},
+            },
+            "note": (qsofa["note"] if qsofa else None),
+        },
+    }
+
+
+# Maximum age of a matched vitals reading before it is treated as unrelated to the
+# ECG segment. The pairing rule (load_real_vitals) matches primarily by interval
+# containment, which returns offset 0 by construction, so this only ever binds on
+# the nearest-filename fallback path.
+VITALS_MAX_AGE_MS = 60 * 60 * 1000  # 60 minutes
+
+
+def load_vitals_for_recording(recording: Recording, vitals_root: str | Path,
+                               max_age_ms: int = VITALS_MAX_AGE_MS) -> dict | None:
+    """Matched real vitals for `recording`, or None if none are usable.
+
+    Uses the ECG file path the parser recorded in `Recording.meta["file"]`, so
+    callers don't have to thread the path separately. Returns None -- never a
+    fabricated or partially-filled dict -- when the recording has no source path,
+    no vitals file matched, or the matched file is older than `max_age_ms`.
+    """
+    src = (recording.meta or {}).get("file")
+    if not src:
+        return None
+    vitals = load_real_vitals(str(src), str(vitals_root))
+    if not vitals.get("vitals_file_found"):
+        return None
+    offset = vitals.get("vitals_time_offset_ms")
+    if offset is not None and abs(offset) > max_age_ms:
+        return None
+    return vitals
+
+
+def run_full_report(recording: Recording, classifier: FiveClassBeatClassifier,
+                     vitals_root: str | Path | None = None) -> tuple[dict, PipelineResult]:
     """The one callable: a Recording -> a complete, transparent RiskReport
     dict (JSON-serializable) with the narrative + MedGemma status attached.
+
+    `vitals_root` (optional): root of the per-patient vitals CSV tree
+    (data/vitals_downloads). When given, real vitals are matched to this segment
+    and the resulting partial NEWS2 / qSOFA-proxy scores are passed into the risk
+    cascade, so the NEWS2/qSOFA safety overrides are actually EVALUATED instead of
+    reported as "no score supplied". When omitted the behaviour is exactly as
+    before -- overrides unevaluated -- so every existing caller is unaffected.
+
+    Missing components are never imputed. compute_partial_news2 scores only the
+    components VitalPatch really measures and lists the rest in
+    `missing_components`; compute_qsofa_proxy leaves the SBP criterion out of its
+    total rather than scoring it 0. Both carry their own caveat strings, which are
+    surfaced in the report's `vitals` block. Note the standing open question in
+    docs/decisions/NEWS2_PARTIAL_COVERAGE_DECISION.md: whether a partial-coverage NEWS2
+    reaching >= 7 should trigger an automated CRITICAL at all. This function does
+    not decide that -- it feeds the score in and lets the existing, unchanged
+    cascade threshold apply.
     """
+    vitals = news2 = qsofa = None
+    if vitals_root is not None:
+        vitals = load_vitals_for_recording(recording, vitals_root)
+        if vitals is not None:
+            news2 = compute_partial_news2(vitals)
+            qsofa = compute_qsofa_proxy(vitals)
+
     pipeline = ECGPipeline(classifier=classifier)
-    result = pipeline.run(recording)
-    report_json = build_risk_report_json(result)
+    result = pipeline.run(
+        recording,
+        news2_score=news2["partial_news2_score"] if news2 else None,
+        qsofa_score=qsofa["qsofa_proxy_score"] if qsofa else None,
+    )
+    vitals_hr = vitals["hr"]["value"] if vitals else None
+    report_json = build_risk_report_json(result, vitals_hr=vitals_hr, classifier=classifier)
+    report_json["vitals"] = _vitals_json(vitals, news2, qsofa, vitals_root)
     render = render_narrative(report_json, result.risk_report, result.audit)
     report_json["narrative"] = render["narrative"]
     report_json["medgemma"] = {"status": render["medgemma_status"], "endpoint": render["endpoint"],

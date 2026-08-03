@@ -44,7 +44,7 @@ from sklearn.metrics import confusion_matrix, f1_score, precision_recall_fscore_
 from sklearn.utils.class_weight import compute_sample_weight
 
 from ecg_pipeline.ecg_pipeline_core import (
-    AAMI_CLASSES, BEATS, DATA_RAW, MODELS_DIR, TARGET_FS,
+    AAMI_CLASSES, BEATS, DATA_RAW, MODELS_DIR, MODELS_EXPERIMENTS_DIR, TARGET_FS,
     ConformalRiskPredictor, FiveClassBeatClassifier, INPUT_LEN, PretrainResult,
     N_FEATURES, N_FEATURES_WITH_TIMING, TIMING_FEATURE_NAMES, _feature_width,
     apply_filter_chain, beat_feature_vector, detect_and_segment,
@@ -488,7 +488,7 @@ def main_train_encoder(argv=None):
     parser = argparse.ArgumentParser(description=_TRAIN_ENCODER_DOC)
     parser.add_argument("--max-files", type=int, default=20)
     parser.add_argument("--epochs", type=int, default=20)
-    parser.add_argument("--out", type=Path, default=MODELS_DIR / "ecg_encoder.pt")
+    parser.add_argument("--out", type=Path, default=MODELS_EXPERIMENTS_DIR / "ecg_encoder.pt")
     args = parser.parse_args(argv)
 
     print("Collecting unlabeled beat windows from real local recordings...")
@@ -757,7 +757,10 @@ def main_train_classifiers(argv=None):
     parser = argparse.ArgumentParser(description=_TRAIN_CLASSIFIERS_DOC)
     parser.add_argument("--dataset", choices=["mitdb"], default="mitdb")
     parser.add_argument("--data-root", type=Path, default=DATA_RAW / "public")
-    parser.add_argument("--out", type=Path, default=MODELS_DIR / "five_class_xgb.json")
+    parser.add_argument("--out", type=Path, default=MODELS_EXPERIMENTS_DIR / "five_class_xgb.json",
+                         help="experiments only -- defaults into models/experiments/, never "
+                              "models/production/ (AGENT_RULES.md rule 3). Promotion to production "
+                              "is a separate, explicit, human-approved copy.")
     parser.add_argument("--include-svdb", action=argparse.BooleanOptionalAction, default=True,
                          help="add all 78 SVDB records into training (S-class boost); DS2 stays pure MITDB")
     parser.add_argument("--include-incart", action=argparse.BooleanOptionalAction, default=False,
@@ -847,8 +850,10 @@ def main_train_classifiers(argv=None):
         # `-m ecg_pipeline.ecg_pipeline_tools train-classifiers` resolves relative paths
         # against the caller's cwd, not this package's directory, so a
         # relative --out can silently point outside models/ (and crash at
-        # save time once training has already finished).
-        args.out = (MODELS_DIR.parent / args.out).resolve()
+        # save time once training has already finished). Anchored on
+        # MODELS_EXPERIMENTS_DIR, not models/ itself, so a bare `--out foo.json`
+        # cannot land beside production weights.
+        args.out = (MODELS_EXPERIMENTS_DIR / args.out).resolve()
 
     db_dir = args.data_root / args.dataset
     ds1_record_ids = DS1_TRAIN if args.train_split == "ds1_train" else MITDB_DS1
@@ -1062,6 +1067,15 @@ def main_train_classifiers(argv=None):
         # live) so this comparison is cheap to print every time; if either
         # model is ever retrained, update these dicts and cite the new
         # eval-classifier run in ABLATION_REPORT.md.
+        #
+        # DELIBERATELY NOT UPDATED to the 2026-08-03 re-measurement (production
+        # V F1 is 0.830, not 0.826, under current code -- see
+        # docs/CLASSIFIER_EVAL_MITDB_SVDB_2026-08-03.md). Neither model was
+        # retrained; the shift comes from feature-path changes. Both dicts were
+        # measured under the SAME older code, so they remain a valid A/B against
+        # each other. Updating only baseline_ds2 would compare across code
+        # versions and move the V-regression disqualification boundary by 0.004.
+        # If these are ever refreshed, re-measure timing-v1 in the same run.
         baseline_ds2 = {"N": 0.9720, "S": 0.1390, "V": 0.8260, "F": 0.0110, "Q": 0.0000}
         timing_v1_ds2 = {"N": 0.9750, "S": 0.1820, "V": 0.7750, "F": 0.0100, "Q": 0.0000}
         timing_v1_s_to_v_rate = 0.558  # 1001/1795, from timing-v1's eval-classifier run
@@ -1277,7 +1291,7 @@ defaulting to the Youden's-J-maximizing point (sensitivity + specificity -
 
 Usage:
     python -m ecg_pipeline.ecg_pipeline_tools train-twostage \
-        --out-prefix models/five_class_xgb_twostage_v1
+        --out-prefix five_class_xgb_twostage_v1     # -> models/experiments/
 """
 
 # Reference floors, derived from the pinned baseline's DS2 confusion matrix
@@ -1518,7 +1532,8 @@ def cross_fit_stage1_proba(X_train: np.ndarray, y_train: list[str], fold_id: np.
 def main_train_twostage(argv=None):
     parser = argparse.ArgumentParser(description=_TRAIN_TWOSTAGE_DOC)
     parser.add_argument("--data-root", type=Path, default=DATA_RAW / "public")
-    parser.add_argument("--out-prefix", type=Path, default=MODELS_DIR / "five_class_xgb_twostage_v1")
+    parser.add_argument("--out-prefix", type=Path,
+                         default=MODELS_EXPERIMENTS_DIR / "five_class_xgb_twostage_v1")
     parser.add_argument("--include-svdb", action=argparse.BooleanOptionalAction, default=True,
                          help="add all 78 SVDB records into training (same as production's recipe)")
     parser.add_argument("--seed", type=int, default=42)
@@ -1550,7 +1565,7 @@ def main_train_twostage(argv=None):
                          help="number of record-level folds for Experiment B's Stage-1 cross-fitting")
     args = parser.parse_args(argv)
     if not args.out_prefix.is_absolute():
-        args.out_prefix = (MODELS_DIR.parent / args.out_prefix).resolve()
+        args.out_prefix = (MODELS_EXPERIMENTS_DIR / args.out_prefix).resolve()
 
     db_dir = args.data_root / "mitdb"
     svdb_dir = args.data_root / "svdb"
@@ -1804,8 +1819,10 @@ Usage:
 def main_analyze_twostage_stage1(argv=None):
     parser = argparse.ArgumentParser(description=_ANALYZE_TWOSTAGE_STAGE1_DOC)
     parser.add_argument("--data-root", type=Path, default=DATA_RAW / "public")
-    parser.add_argument("--stage1-model", type=Path, default=MODELS_DIR / "five_class_xgb_twostage_v1_stage1.json")
-    parser.add_argument("--stage2-model", type=Path, default=MODELS_DIR / "five_class_xgb_twostage_v1_stage2.json")
+    parser.add_argument("--stage1-model", type=Path,
+                         default=MODELS_EXPERIMENTS_DIR / "five_class_xgb_twostage_v1_stage1.json")
+    parser.add_argument("--stage2-model", type=Path,
+                         default=MODELS_EXPERIMENTS_DIR / "five_class_xgb_twostage_v1_stage2.json")
     parser.add_argument("--confident-threshold", type=float, default=0.85,
                          help="P(abnormal) above which a leaked N beat counts as 'confidently wrong', "
                               "not just leaked")

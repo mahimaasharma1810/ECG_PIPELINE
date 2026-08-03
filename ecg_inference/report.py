@@ -97,6 +97,18 @@ class SimilarCaseIndex:
 OLLAMA_URL = "http://localhost:11434/api/generate"
 MEDGEMMA_MODEL = "medgemma"
 CRITICAL_LATENCY_TARGET_MS = 500
+# Measured on real hardware (RTX 2080 Ti, medgemma:latest 4.3B Q4_K_M):
+# loading the model into GPU memory from a cold/idle Ollama server takes
+# ~75.6s end to end, vs. ~4.4s once it's already warm. The previous 10s
+# default was well under the cold case, so call_medgemma() below would
+# time out and silently fall back to rule-based-only on essentially every
+# request after any few-minute gap (Ollama's default OLLAMA_KEEP_ALIVE is
+# 5 minutes) -- not a rare tail case. This only raises the ceiling so a
+# cold load has room to finish; it does not fix the underlying cold-start
+# cost itself -- pre-warming the model at process start, or keeping it
+# warm with a periodic ping inside OLLAMA_KEEP_ALIVE, is the real fix for
+# that.
+MEDGEMMA_TIMEOUT_S = 90.0
 
 
 PROMPT_TEMPLATE = """You are assisting clinical staff monitoring a post-operative patient's ECG.
@@ -156,7 +168,7 @@ def build_prompt(risk_report: RiskReport, trend: dict, similar_cases_summary: st
     )
 
 
-def call_medgemma(prompt: str, model: str = MEDGEMMA_MODEL, timeout_s: float = 10.0) -> dict | None:
+def call_medgemma(prompt: str, model: str = MEDGEMMA_MODEL, timeout_s: float = MEDGEMMA_TIMEOUT_S) -> dict | None:
     """Calls a locally-deployed MedGemma via Ollama's HTTP API. Returns
     None (not raises) if Ollama isn't reachable, so the pipeline degrades
     to rule-based-only mode instead of crashing — this is itself logged
@@ -262,21 +274,27 @@ def load_classifier(classifier_path: Path) -> FiveClassBeatClassifier:
 # source of truth.
 # ============================================================================
 
-# Reporting-layer calibration notes only, from Docs/BEAT_CLASSIFICATION_SUMMARY.md
-# DS2 (held-out, 22-patient) numbers for the current production model
-# (five_class_xgb.json). Not used by the classifier or cascade -- purely to
-# render an honest confidence caveat alongside beat counts.
+# Reporting-layer calibration notes only, from docs/CLASSIFIER_EVAL_MITDB_SVDB_2026-08-03.md
+# DS2 (held-out, 22-patient, 45,881 beats) numbers for the current production
+# model (five_class_xgb.json), recomputed 2026-08-03 under current code. Not
+# used by the classifier or cascade -- purely to render an honest confidence
+# caveat alongside beat counts. The model file is unchanged since these were
+# first published; the small shifts come from feature-path changes in
+# segment_beats/to_target_rate/robust_zscore, so re-run eval-classifier and
+# update here whenever that path changes, not only on a retrain.
 CLASS_CONFIDENCE_NOTES = {
     "N": {"confidence": "HIGH",
           "note": "Majority class; reliable in practice though not broken out separately in the DS2 macro-F1 table."},
     "S": {"confidence": "LOW",
-          "note": "DS2 held-out F1 = 0.139 (production five_class_xgb.json). Frequent S<->N confusion -- "
-                  "treat S counts as a screening signal, not a diagnosis."},
+          "note": "DS2 held-out F1 = 0.152 (production five_class_xgb.json). Frequent S<->N confusion -- "
+                  "65% of true S beats are classified N. Treat S counts as a screening signal, "
+                  "not a diagnosis."},
     "V": {"confidence": "MODERATE-HIGH",
-          "note": "DS2 held-out F1 = 0.826 (production five_class_xgb.json). The most reliable class this "
-                  "model produces."},
+          "note": "DS2 held-out F1 = 0.830 (production five_class_xgb.json). The most reliable class this "
+                  "model produces on MIT-BIH. Note V precision falls to 0.377 on an unseen database "
+                  "(SVDB), so this figure may not transfer to other recording populations."},
     "F": {"confidence": "LOW",
-          "note": "DS2 held-out F1 = 0.011 (production five_class_xgb.json). Essentially unsolved -- any F "
+          "note": "DS2 held-out F1 = 0.005 (production five_class_xgb.json). Essentially unsolved -- any F "
                   "count should be treated as noise, not a finding."},
     "Q": {"confidence": "N/A",
           "note": "Assigned to beats rejected by the deterministic quality gate, not predicted by the classifier."},
@@ -291,6 +309,17 @@ def _get_audit_payload(audit: AuditLog, event_type: str) -> dict | None:
 
 
 def _beat_summary(result: PipelineResult) -> dict:
+    """Per-class beat counts and their share of the recording.
+
+    Denominator is `len(beat_labels)` = every DETECTED beat, including the
+    quality-rejected ones labeled "Q", so the field is named
+    `pct_of_detected_beats`. Previously named `pct_of_analyzed_beats` over the same
+    denominator, which rendered the self-contradictory "Q: N beats (x% of analyzed
+    beats)" -- Q beats are by definition not analyzed. Kept as the all-detected
+    denominator (rather than switching to n_beats_analyzed) so this agrees with
+    score_recording()'s pvc_burden_pct/pac_burden_pct, which use the same base.
+    Mirrors ecg_pipeline/agent_bridge.py:_beat_summary -- keep the two in sync.
+    """
     labels = result.beat_labels
     n = len(labels)
     summary = {}
@@ -298,10 +327,19 @@ def _beat_summary(result: PipelineResult) -> dict:
         count = labels.count(c)
         summary[c] = {
             "count": count,
-            "pct_of_analyzed_beats": round(100.0 * count / n, 2) if n else 0.0,
+            "pct_of_detected_beats": round(100.0 * count / n, 2) if n else 0.0,
             **CLASS_CONFIDENCE_NOTES[c],
         }
     return summary
+
+
+def beat_summary_pct(info: dict) -> float:
+    """Reads a beat_summary entry's percentage, accepting both the current
+    `pct_of_detected_beats` key and the legacy `pct_of_analyzed_beats` one so
+    already-saved report JSONs stay readable. Same number, renamed field."""
+    if "pct_of_detected_beats" in info:
+        return info["pct_of_detected_beats"]
+    return info.get("pct_of_analyzed_beats", 0.0)
 
 
 def _rhythm_findings_json(result: PipelineResult) -> list[dict]:
@@ -369,6 +407,10 @@ def _build_rule_trace(risk_report: RiskReport, audit: AuditLog,
     """
     hrv_payload = _get_audit_payload(audit, "STAGE6_FEATURES") or {}
     sdnn_ms = hrv_payload.get("hrv", {}).get("sdnn_ms", 0.0)
+    # None (see recording_level_hrv()) means too few valid RR intervals to
+    # compute a real SDNN -- show that reason explicitly rather than a bare
+    # number or a value a reviewer could mistake for a measured zero.
+    sdnn_display = round(sdnn_ms, 3) if sdnn_ms is not None else "not evaluated (<3 valid RR intervals)"
 
     trace = [
         {
@@ -408,7 +450,7 @@ def _build_rule_trace(risk_report: RiskReport, audit: AuditLog,
         },
         {
             "condition": "Sustained HRV suppression: SDNN < threshold",
-            "measured_value": round(sdnn_ms, 3),
+            "measured_value": sdnn_display,
             "threshold": thresholds.hrv_sdnn_suppressed_ms,
             "fired": risk_report.hrv_suppressed,
             "would_set_level": "MEDIUM",
@@ -480,12 +522,12 @@ def _confidence_statement(deciding_rule: dict) -> dict:
     if depends_on_s_or_f:
         tier = "LOW"
         statement = ("The deciding rule depends on S (supraventricular) beat counts. The production "
-                      "classifier's held-out S-class F1 is 0.139 -- this level should be treated as a "
+                      "classifier's held-out S-class F1 is 0.152 -- this level should be treated as a "
                       "screening flag, not a reliable diagnosis, until confirmed by clinician review.")
     elif "VT run" in deciding_rule["condition"] or "PVC" in deciding_rule["condition"]:
         tier = "MODERATE-HIGH"
         statement = ("The deciding rule depends on V (ventricular) beat counts. The production classifier's "
-                      "held-out V-class F1 is 0.826 -- the most reliable class this model produces, though "
+                      "held-out V-class F1 is 0.830 -- the most reliable class this model produces, though "
                       "still not a clinical-grade guarantee.")
     elif "HRV" in deciding_rule["condition"] or "SDNN" in deciding_rule["condition"]:
         tier = "MODERATE"
@@ -501,7 +543,7 @@ def _confidence_statement(deciding_rule: dict) -> dict:
     else:
         tier = "BASELINE"
         statement = ("No threshold was exceeded (LOW). Because the S and F classes are the model's weakest "
-                      "(held-out F1 0.139 and 0.011), a LOW read here does not rule out under-counted S/F "
+                      "(held-out F1 0.152 and 0.005), a LOW read here does not rule out under-counted S/F "
                       "events -- it reliably rules out V-burden, VT runs, and HRV suppression, which this "
                       "model detects well.")
     return {
@@ -567,7 +609,7 @@ def build_risk_report_json(result: PipelineResult) -> dict:
         "safety_overrides": _safety_overrides_json(result.risk_report, rule_trace),
         "known_limitations": [
             "Beat classifier is the frozen production XGBoost model (five_class_xgb.json). DS2 held-out "
-            "per-class F1: V=0.826 (reliable), S=0.139 (LOW-CONFIDENCE), F=0.011 (LOW-CONFIDENCE, essentially "
+            "per-class F1: V=0.830 (reliable), S=0.152 (LOW-CONFIDENCE), F=0.005 (LOW-CONFIDENCE, essentially "
             "unsolved). Any finding driven primarily by S or F counts is a screening flag, not a diagnosis.",
             "NEWS2/qSOFA vitals pairing is not wired into this ECG-only bridge -- safety_overrides above are "
             "reported as not-evaluated rather than fabricated.",
@@ -725,8 +767,8 @@ def _render_beat_summary_block(beat_summary: dict) -> str:
     lines = []
     for cls, info in beat_summary.items():
         caveat = f" [{info['confidence']} CONFIDENCE -- {info['note']}]" if info.get("confidence") == "LOW" else ""
-        lines.append(f"- {cls}: {info['count']} beats ({_fmt_num(info['pct_of_analyzed_beats'])}% "
-                      f"of analyzed beats){caveat}")
+        lines.append(f"- {cls}: {info['count']} beats ({_fmt_num(beat_summary_pct(info))}% "
+                      f"of detected beats){caveat}")
     return "\n".join(lines) if lines else "(no beats survived quality gating)"
 
 

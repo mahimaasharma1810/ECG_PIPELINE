@@ -23,7 +23,7 @@ change traces back to a ranked recommendation in the internal review
 PDF).
 
 Stage map (same 9 stages as the baseline):
-  1. Ingest       — VitalPatch / SeNSiO / WFDB parsers
+  1. Ingest       — VitalPatch / ProRhythm / WFDB parsers
   2. Quality      — SQI gate (recommendation #6 fix)
   3. Resample     — uniform 125 Hz
   4. Filters      — 5-step filter chain + per-beat robust Z-score
@@ -35,7 +35,7 @@ Stage map (same 9 stages as the baseline):
 
 Run it:
     python -m ecg_pipeline.ecg_pipeline_core --source vitalpatch --limit 3
-    python -m ecg_pipeline.ecg_pipeline_core --source sensio --limit 3
+    python -m ecg_pipeline.ecg_pipeline_core --source prorhythm --limit 3
 """
 from __future__ import annotations
 
@@ -73,8 +73,16 @@ constant says which recommendation it implements.
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_RAW = PROJECT_ROOT / "data" / "raw"
-MODELS_DIR = Path(__file__).resolve().parent / "models"
-MODELS_DIR.mkdir(exist_ok=True)
+# Models live in a single repo-level tree, not per-package: production weights
+# were previously duplicated byte-for-byte in ecg_pipeline/models/ and
+# ecg_inference/models/, so a promotion had to be remembered in two places.
+# MODELS_DIR is the *load* path (production only); experiments write to
+# MODELS_EXPERIMENTS_DIR -- AGENT_RULES.md rule 3 requires that no experiment
+# default can land on production's filename.
+MODELS_DIR = PROJECT_ROOT / "models" / "production"
+MODELS_EXPERIMENTS_DIR = PROJECT_ROOT / "models" / "experiments"
+MODELS_DIR.mkdir(parents=True, exist_ok=True)
+MODELS_EXPERIMENTS_DIR.mkdir(parents=True, exist_ok=True)
 
 TARGET_FS = 125.0  # Hz, common resample target (VitalPatch native rate)
 
@@ -104,7 +112,7 @@ class SQIThresholds:
     missing_frac_max: float = 0.03
     kurtosis_min: float = 1.5  # QRS impulse character, computed per-beat-window, NOT RR-interval based
     # Real device recordings arrive in arbitrary firmware-scaled raw ADC counts with no published
-    # mV-per-count constant (VitalPatch and SeNSiO both do this). Absolute-mV thresholds would be
+    # mV-per-count constant (VitalPatch and ProRhythm both do this). Absolute-mV thresholds would be
     # meaningless without that calibration constant, so baseline wander is expressed as a ratio of
     # the window's own robust dynamic range (IQR) instead of a hard mV number.
     baseline_wander_ratio_max: float = 1.2
@@ -144,6 +152,15 @@ class RiskThresholds:
     pac_burden_high_pct: float = 15.0
     vt_run_beats: int = 3  # >=3 consecutive V beats = VT run
     afib_burden_high_pct: float = 30.0
+    # AFib *detector* threshold (distinct from afib_burden_high_pct above, which is
+    # the risk-cascade threshold on the resulting burden). Hoisted here from
+    # _afib_suspected's default argument so the reporting layer can render the real
+    # value instead of a hardcoded literal -- agent_bridge's evidence_text used to
+    # say "> 0.15" long after this was validated down to 0.10, which meant clinicians
+    # were shown a decision boundary the code no longer used. Anything that displays
+    # or documents this threshold must read it from here.
+    afib_rr_cv_threshold: float = 0.10
+    afib_rr_window_beats: int = 20
     hrv_sdnn_suppressed_ms: float = 20.0  # conservative low-HRV cutoff
     news2_critical_threshold: int = 7
     qsofa_high_threshold: int = 2
@@ -253,11 +270,11 @@ class Recording:
     signal_mv: np.ndarray          # 1-D raw signal, arbitrary units at this stage
     timestamps_ms: np.ndarray      # 1-D, same length as signal, epoch ms (or synthetic)
     fs_nominal: float              # nominal sample rate in Hz
-    source: str                   # "vitalpatch" | "sensio" | "wfdb"
+    source: str                   # "vitalpatch" | "prorhythm" | "wfdb"
     patient_id: str
     segment_id: str
     gaps: list = field(default_factory=list)          # list of (start_idx, end_idx, gap_ms) flagged, not dropped
-    already_bandpass_filtered: bool = False             # SeNSiO pre-filtered variant
+    already_bandpass_filtered: bool = False             # ProRhythm pre-filtered variant
     meta: dict = field(default_factory=dict)
 
 
@@ -346,8 +363,8 @@ def parse_vitalpatch_vitals(csv_path: Path) -> pd.DataFrame:
     return df.ffill()
 
 
-def parse_sensio_ecg(csv_path: Path) -> Recording:
-    """SeNSiO: 11 metadata rows, blank rows, header at row 16 (0-indexed 15).
+def parse_prorhythm_ecg(csv_path: Path) -> Recording:
+    """ProRhythm: 11 metadata rows, blank rows, header at row 16 (0-indexed 15).
 
     Raw variant has column 'ECG'; pre-filtered variant has 'ECG_Raw' and
     'ECG_Filtered' — if the filtered column is present we mark the
@@ -382,7 +399,7 @@ def parse_sensio_ecg(csv_path: Path) -> Recording:
     else:
         signal = df["ECG"].to_numpy(dtype=np.float64)
 
-    fs_nominal = _sensio_fs_from_command(meta.get("Command Sent", ""))
+    fs_nominal = _prorhythm_fs_from_command(meta.get("Command Sent", ""))
     n = len(signal)
     timestamps_ms = np.arange(n) * (1000.0 / fs_nominal)
 
@@ -390,7 +407,7 @@ def parse_sensio_ecg(csv_path: Path) -> Recording:
         signal_mv=signal,
         timestamps_ms=timestamps_ms,
         fs_nominal=fs_nominal,
-        source="sensio",
+        source="prorhythm",
         patient_id=meta.get("Bluetooth Device ID", "unknown"),
         segment_id=csv_path.stem,
         already_bandpass_filtered=already_filtered,
@@ -398,7 +415,7 @@ def parse_sensio_ecg(csv_path: Path) -> Recording:
     )
 
 
-def _sensio_fs_from_command(command_sent: str, default_fs: float = 100.0) -> float:
+def _prorhythm_fs_from_command(command_sent: str, default_fs: float = 100.0) -> float:
     """Parse 'STARTECG_F:100' style command strings for sample rate."""
     if ":" in command_sent:
         try:
@@ -445,7 +462,7 @@ def discover_vitalpatch_files(root: Path) -> list[Path]:
     return sorted(root.glob("Patch_*/*_ecg.csv"))
 
 
-def discover_sensio_files(root: Path) -> list[Path]:
+def discover_prorhythm_files(root: Path) -> list[Path]:
     return sorted(root.glob("ECG_*.csv"))
 
 
@@ -551,7 +568,7 @@ def _morphology_kurtosis(x: np.ndarray) -> float:
     has the sharp/peaky character of real QRS complexes.
 
     Caller passes a copy already band-limited to the physiological ECG band
-    (see evaluate_window) rather than the fully raw window — on SeNSiO's raw
+    (see evaluate_window) rather than the fully raw window — on ProRhythm's raw
     "ECG" channel, a dominant near-Nyquist artifact (more spectral power
     above 40Hz than below, confirmed by FFT) swamps the raw amplitude
     distribution and reads as kurtosis ~ -1 (near-uniform) even when real
@@ -626,7 +643,7 @@ def evaluate_window(x: np.ndarray, t_ms: np.ndarray, fs: float,
 
     # snr_db's "noise" is literally everything outside 0.5-40Hz, i.e. a
     # sliver from bandpass_high_hz up to this window's own Nyquist. For a
-    # native rate close to 2x bandpass_high_hz (SeNSiO's 100Hz -> Nyquist
+    # native rate close to 2x bandpass_high_hz (ProRhythm's 100Hz -> Nyquist
     # 50Hz) that sliver is only a few Hz wide and sits exactly where the
     # mains notch (50Hz) is mathematically invalid (powerline_notch()
     # no-ops once notch_hz >= Nyquist) -- so any near-Nyquist artifact in
@@ -775,7 +792,7 @@ def to_target_rate(signal: np.ndarray, timestamps_ms: np.ndarray, fs_nominal: fl
                     target_fs: float = TARGET_FS) -> tuple[np.ndarray, np.ndarray]:
     """Dispatch: decimate when downsampling from a clean integer-ratio
     source (WFDB-style fixed fs), otherwise linear-interpolate irregular
-    wearable timestamps (VitalPatch/SeNSiO).
+    wearable timestamps (VitalPatch/ProRhythm).
     """
     if abs(fs_nominal - target_fs) < 1e-6:
         return signal, timestamps_ms
@@ -795,7 +812,7 @@ def to_target_rate(signal: np.ndarray, timestamps_ms: np.ndarray, fs_nominal: fl
 # ============================================================================
 """Stage 4 — Five-step filter chain, applied in order.
 
-Each step assumes the previous one has run. SeNSiO pre-filtered files skip
+Each step assumes the previous one has run. ProRhythm pre-filtered files skip
 steps 1-4 (device already bandpass-filtered) and start at step 5, to avoid
 double-filtering artefacts.
 """
@@ -1212,7 +1229,7 @@ def detect_and_segment(signal: np.ndarray, fs: float, cfg: BeatWindowConfig = BE
 
     `snap_radius` defaults to 8, the value validated via a 13-record MITDB
     (wfdb) sweep -- see _snap_to_local_peak's docstring. That sweep was
-    wfdb-only; on real-device sources (vitalpatch/sensio) radius=8 was
+    wfdb-only; on real-device sources (vitalpatch/prorhythm) radius=8 was
     later found to cause catastrophic beat-level over-culling on a subset
     of recordings (up to 130/133 beats rejected via R_PEAK_NOT_LOCAL_MAX
     on one, non-monotonically -- radius 3/5/10/15/20 were all fine, only
@@ -1342,12 +1359,49 @@ def _wavelet_features(window: np.ndarray, wavelet: str = "db4") -> np.ndarray:
     ])
 
 
+# Column index of local_hrv inside the 5 morphological features (and therefore
+# inside the full feature vector, since morphology comes first). Named rather than
+# written as a bare 1 because fill_missing_local_hrv() has to find it after the
+# fact.
+LOCAL_HRV_FEATURE_IDX = 1
+
+
 def _morphological_features(window: np.ndarray, primary_pre_samples: int,
-                             rr_pre_ms: float | None, rr_post_ms: float | None) -> np.ndarray:
+                             rr_pre_ms: float | None, rr_post_ms: float | None,
+                             rr_flagged: bool = False) -> np.ndarray:
+    """The 5 morphological/timing scalars, in order:
+    [rr_pre, local_hrv, area_ratio, above_below_ratio, amplitude_range].
+
+    `rr_flagged` (Beat.rr_flagged) means at least one of this beat's adjacent RR
+    intervals is outside the physiological range -- in practice, a missed-beat gap
+    across an SQI-rejected stretch. When set, `local_hrv` is emitted as NaN instead
+    of the raw difference.
+
+    WHY: local_hrv = rr_post - rr_pre had no such guard, so a detection gap entered
+    the classifier as if it were physiology. Measured on VitalPatch segment
+    184B27/seg1: beat 27 carried local_hrv = 5104 ms (a 5.1-second gap) and TreeSHAP
+    ranked that the single largest attribution in the entire segment (+2.93 toward
+    class V) -- i.e. the model called a beat ventricular because the device lost
+    signal. recording_level_hrv() and RhythmContextEngine._afib_suspected() already
+    excluded flagged intervals; the feature extractor was the one place that did not.
+
+    NaN, not 0.0 and not the gap value: 0.0 is a real, common local_hrv (perfectly
+    regular rhythm) and would be indistinguishable from "unknown" downstream -- the
+    same sentinel trap as the SDNN 0.0 bug. NaN is filled with the segment median by
+    fill_missing_local_hrv() on the batch path, and is handled natively as `missing`
+    by XGBoost if any single-vector path leaves it unfilled.
+
+    Note this deliberately does NOT guard rr_pre (feature 0), which can carry the
+    same gap value when the gap precedes the beat -- that is a scope decision, not
+    an oversight; see the audit notes accompanying this change.
+    """
     r_idx = primary_pre_samples
 
     rr_pre = rr_pre_ms if rr_pre_ms is not None else 0.0
-    local_hrv = (rr_post_ms - rr_pre_ms) if (rr_pre_ms and rr_post_ms) else 0.0
+    if rr_flagged:
+        local_hrv = np.nan
+    else:
+        local_hrv = (rr_post_ms - rr_pre_ms) if (rr_pre_ms and rr_post_ms) else 0.0
 
     left = window[:r_idx]
     right = window[r_idx:]
@@ -1533,7 +1587,8 @@ def beat_feature_vector(beat: Beat, primary_pre_samples: int,
     if timing_only:
         return _timing_features(beat, drop_compensatory_pause=drop_compensatory_pause)
     normalized = robust_zscore(beat.primary_window)
-    morph = _morphological_features(normalized, primary_pre_samples, beat.rr_pre_ms, beat.rr_post_ms)
+    morph = _morphological_features(normalized, primary_pre_samples, beat.rr_pre_ms, beat.rr_post_ms,
+                                     rr_flagged=beat.rr_flagged)
     wavelet = _wavelet_features(normalized)
     parts = [morph, wavelet]
     if include_timing:
@@ -1545,6 +1600,47 @@ def beat_feature_vector(beat: Beat, primary_pre_samples: int,
     return np.concatenate(parts)
 
 
+def fill_missing_local_hrv(matrix: np.ndarray, col: int = LOCAL_HRV_FEATURE_IDX) -> tuple[np.ndarray, dict]:
+    """Replaces NaN local_hrv values (emitted by _morphological_features for beats
+    whose adjacent RR is a missed-beat gap) with the MEDIAN of that segment's valid
+    local_hrv values.
+
+    Median, not mean: this recording's valid values are exactly the ones the gap
+    beats sit among, and a high-ectopy strip has a long-tailed local_hrv
+    distribution that a mean would chase. Median of the segment's own beats is the
+    least-assumption stand-in that is still a physiologically real value for THIS
+    patient at THIS time.
+
+    Not 0.0: that asserts "perfectly regular here", which is a real measurement and
+    a common one, so it would be indistinguishable from a genuine reading.
+
+    Returns (matrix, stats). When every value in the column is NaN there is no
+    within-segment median to borrow, so the column falls back to 0.0 and says so in
+    stats["all_missing"] rather than silently emitting NaN into the classifier.
+    """
+    stats = {"n_missing": 0, "n_total": int(matrix.shape[0]), "fill_value": None,
+             "all_missing": False}
+    if matrix.size == 0 or col >= matrix.shape[1]:
+        return matrix, stats
+
+    missing = np.isnan(matrix[:, col])
+    stats["n_missing"] = int(missing.sum())
+    if not missing.any():
+        return matrix, stats
+
+    valid = matrix[~missing, col]
+    if len(valid) == 0:
+        stats["all_missing"] = True
+        stats["fill_value"] = 0.0
+        matrix[missing, col] = 0.0
+        return matrix, stats
+
+    fill = float(np.median(valid))
+    stats["fill_value"] = fill
+    matrix[missing, col] = fill
+    return matrix, stats
+
+
 def batch_feature_matrix(beats: list[Beat], primary_pre_samples: int,
                           include_timing: bool = False,
                           drop_compensatory_pause: bool = False,
@@ -1553,7 +1649,13 @@ def batch_feature_matrix(beats: list[Beat], primary_pre_samples: int,
                           include_qrs_shape: bool = False) -> tuple[np.ndarray, list[int]]:
     """Returns (feature_matrix, indices_into_beats_used) — skipping
     rejected/out-of-bounds beats but preserving which original beat each
-    row corresponds to."""
+    row corresponds to.
+
+    NaN local_hrv values are median-filled here (see fill_missing_local_hrv). This
+    is the batch path used by both runtime inference and dataset building, so both
+    get identical treatment. `timing_only=True` returns no morphology block, so
+    there is no local_hrv column to fill and the step is skipped.
+    """
     rows, idxs = [], []
     for i, beat in enumerate(beats):
         vec = beat_feature_vector(beat, primary_pre_samples, include_timing=include_timing,
@@ -1566,7 +1668,10 @@ def batch_feature_matrix(beats: list[Beat], primary_pre_samples: int,
     if not rows:
         return np.zeros((0, _feature_width(include_timing, drop_compensatory_pause,
                                             timing_only, include_r_amp, include_qrs_shape))), []
-    return np.vstack(rows), idxs
+    matrix = np.vstack(rows)
+    if not timing_only:  # timing_only has no morphology block, so no local_hrv column
+        matrix, _ = fill_missing_local_hrv(matrix)
+    return matrix, idxs
 
 
 def recording_level_hrv(beats: list[Beat]) -> dict:
@@ -1640,7 +1745,7 @@ Med-High effort) from the internal review, combined into one component:
   * It is pretrained with a masked-reconstruction objective (mask random
     spans of the waveform, learn to reconstruct them) — a standard
     self-supervised recipe that needs zero labels, only raw ECG. This lets
-    us pretrain directly on this pipeline's own unlabeled VitalPatch/SeNSiO
+    us pretrain directly on this pipeline's own unlabeled VitalPatch/ProRhythm
     recordings today, before any public labeled dataset (MITDB, Icentia11k,
     ...) is available, and later fine-tune a classification head once
     labels exist.
@@ -1731,7 +1836,7 @@ def pretrain_self_supervised(windows: np.ndarray, epochs: int = 20, batch_size: 
 
     `windows` must be shape (n, INPUT_LEN), already filtered/normalized
     (robust z-score) by stages 4/6. No labels required — this is exactly
-    what lets us pretrain on this pipeline's own VitalPatch/SeNSiO data before
+    what lets us pretrain on this pipeline's own VitalPatch/ProRhythm data before
     any labeled public dataset is downloaded.
     """
     if len(windows) == 0:
@@ -1875,6 +1980,32 @@ class RuleBasedBeatClassifier:
         return ClassificationResult(label, probs, "rule_based_fallback", False)
 
 
+# Names for the 56-dim production feature vector, in the exact order
+# beat_feature_vector() concatenates them: _morphological_features returns 5
+# scalars, then _wavelet_features returns 14 a4 + 23 d3 + 14 d4 = 51 wavelet
+# coefficients. Used only to label SHAP attributions in reports -- nothing in
+# training or inference reads this, so it cannot affect a prediction.
+FEATURE_NAMES: list[str] = (
+    ["rr_pre_ms", "local_hrv_ms", "area_ratio_pre_post", "above_below_ratio", "amplitude_range"]
+    + [f"wavelet_a4_{i}" for i in range(14)]
+    + [f"wavelet_d3_{i}" for i in range(23)]
+    + [f"wavelet_d4_{i}" for i in range(14)]
+)
+
+# Plain-language gloss for the 5 morphological features, so a report can say
+# "wide/tall QRS" rather than "amplitude_range". Wavelet coefficients are
+# deliberately not glossed: they are shape descriptors with no single clinical
+# reading, and inventing one would be the kind of unearned interpretation this
+# project avoids elsewhere.
+FEATURE_GLOSS: dict[str, str] = {
+    "rr_pre_ms": "RR interval before this beat (prematurity)",
+    "local_hrv_ms": "change in RR across this beat (short-long pattern)",
+    "area_ratio_pre_post": "pre-R vs post-R waveform area (QRS asymmetry)",
+    "above_below_ratio": "positive vs negative deflection balance (polarity)",
+    "amplitude_range": "peak-to-peak amplitude of the beat window (QRS size)",
+}
+
+
 class FiveClassBeatClassifier:
     """AAMI 5-class classifier (N/S/V/F/Q). Trainable via `fit()` on
     (feature_matrix, labels) once a labeled dataset (MITDB/Icentia11k/...)
@@ -1954,6 +2085,59 @@ class FiveClassBeatClassifier:
             return ClassificationResult(label, probs, "trained_model", True)
         return self._fallback.classify(beat, mean_rr_ms)
 
+    def explain(self, feature_vec: np.ndarray, label: str, top_k: int = 5) -> dict | None:
+        """Exact TreeSHAP attributions for ONE beat's predicted class.
+
+        Uses XGBoost's own `pred_contribs=True`, which computes exact TreeSHAP
+        values for tree ensembles -- numerically identical to what the `shap`
+        package's TreeExplainer returns for this model, without adding a
+        dependency (`shap` is not installed in this environment).
+
+        SHAP values are in the model's margin (log-odds) space, not probability
+        space, and they sum to `margin - base_value` for the chosen class. They
+        explain THIS model's decision; they are not evidence that the decision is
+        clinically correct, which no amount of attribution can establish without
+        labeled ground truth on this device.
+
+        Returns None when the model isn't trained or the vector is missing, so a
+        caller can distinguish "no explanation available" from "explained as
+        nothing". Never raises into the reporting path.
+        """
+        if self.model is None or feature_vec is None:
+            return None
+        try:
+            import xgboost as xgb
+            classes = list(self._label_encoder.classes_)
+            if label not in classes:
+                return None
+            cls_idx = classes.index(label)
+
+            dm = xgb.DMatrix(np.asarray(feature_vec, dtype=float).reshape(1, -1))
+            contribs = self.model.get_booster().predict(dm, pred_contribs=True)
+            contribs = np.asarray(contribs)
+            # Multiclass -> (n_rows, n_classes, n_features+1); binary -> (n_rows, n_features+1).
+            row = contribs[0][cls_idx] if contribs.ndim == 3 else contribs[0]
+            values, base = row[:-1], float(row[-1])
+
+            n = min(len(values), len(FEATURE_NAMES))
+            ranked = sorted(range(n), key=lambda i: abs(values[i]), reverse=True)[:top_k]
+            return {
+                "explained_class": label,
+                "base_value": round(base, 4),
+                "sum_shap": round(float(np.sum(values)), 4),
+                "space": "margin (log-odds), not probability",
+                "top_features": [
+                    {"feature": FEATURE_NAMES[i],
+                     "meaning": FEATURE_GLOSS.get(FEATURE_NAMES[i]),
+                     "value": round(float(feature_vec[i]), 4),
+                     "shap": round(float(values[i]), 4),
+                     "direction": "toward" if values[i] > 0 else "away from"}
+                    for i in ranked
+                ],
+            }
+        except Exception as e:  # never let an explanation break a clinical report
+            return {"error": f"{type(e).__name__}: {e}", "explained_class": label}
+
     def save(self, path: Path):
         if self.model is not None:
             self.model.save_model(str(path))
@@ -2027,8 +2211,9 @@ class RhythmContextEngine:
                 i += 1
         return findings
 
-    def _afib_suspected(self, rr_ms: list[float | None], window: int = 20,
-                         cv_threshold: float = 0.10) -> tuple[list[RhythmFinding], int]:
+    def _afib_suspected(self, rr_ms: list[float | None],
+                         window: int = RISK.afib_rr_window_beats,
+                         cv_threshold: float = RISK.afib_rr_cv_threshold) -> tuple[list[RhythmFinding], int]:
         """AFib is a RHYTHM finding computed here from RR irregularity —
         never treated as a quality defect (recommendation #6). High RR
         coefficient-of-variation over a rolling window suggests AFib,
@@ -2070,7 +2255,14 @@ class RhythmContextEngine:
             n_windows_examined += 1
             cv = float(np.std(chunk) / np.mean(chunk)) if np.mean(chunk) > 0 else 0.0
             if cv > cv_threshold:
-                findings.append(RhythmFinding("AFIB_SUSPECTED", start, start + window - 1, {"rr_cv": cv}))
+                # cv_threshold and window are carried in the finding itself so any
+                # display layer renders the threshold this finding was ACTUALLY
+                # produced with, rather than re-stating a literal that can drift out
+                # of sync (which is exactly what happened with the old hardcoded
+                # "> 0.15" text in agent_bridge._rhythm_findings_json).
+                findings.append(RhythmFinding("AFIB_SUSPECTED", start, start + window - 1,
+                                               {"rr_cv": cv, "rr_cv_threshold": cv_threshold,
+                                                "window_beats": window}))
         return findings, n_windows_examined
 
 
@@ -2540,6 +2732,16 @@ class PipelineResult:
     temporal_trend: dict
     merged_decision: object
     audit: AuditLog
+    # Per-beat classifier confidence (max class probability), index-aligned with
+    # `beats`/`beat_labels`. None for quality-rejected beats, which are labeled "Q"
+    # by the gate and never seen by the classifier -- a None here means "not
+    # classified", never "classified with zero confidence". Defaulted so existing
+    # constructors that predate this field keep working.
+    beat_confidences: list = field(default_factory=list)
+    # Per-beat feature vectors, index-aligned the same way (None where the beat was
+    # rejected or had no extractable window). Retained so the reporting layer can
+    # compute SHAP attributions for specific beats without re-running stage 6.
+    beat_feature_vectors: list = field(default_factory=list)
 
 
 class ECGPipeline:
@@ -2601,7 +2803,7 @@ class ECGPipeline:
         # causing severe over-detection (e.g. MITDB 103/111 were ~2x
         # true beat count with Kalman included).
         #
-        # For source="vitalpatch"/"sensio" (arbitrary firmware-scaled raw
+        # For source="vitalpatch"/"prorhythm" (arbitrary firmware-scaled raw
         # ADC counts, no published mV-per-count constant -- see
         # SQIThresholds.baseline_wander_ratio_max): the opposite holds.
         # These sources have real amplitude ~1000x the wfdb mV scale, and
@@ -2657,14 +2859,25 @@ class ECGPipeline:
         mean_rr = float(np.mean([b.rr_post_ms for b in beats if b.rr_post_ms is not None])) \
             if any(b.rr_post_ms is not None for b in beats) else 0.0
         labels = []
+        confidences: list[float | None] = []
+        feature_vectors: list = []
         classifier_sources = set()
         feat_lookup = dict(zip(feature_idxs, feature_matrix))
         for i, beat in enumerate(beats):
             if beat.quality_rejected:
                 labels.append("Q")
+                # None, not 0.0: a rejected beat was never shown to the classifier, so
+                # it has no confidence -- distinct from a beat classified with low
+                # confidence. Same None-vs-sentinel reasoning as recording_level_hrv's
+                # sdnn_ms.
+                confidences.append(None)
+                feature_vectors.append(None)
                 continue
-            result = self.classifier.predict_one(feat_lookup.get(i), beat, mean_rr)
+            fv = feat_lookup.get(i)
+            result = self.classifier.predict_one(fv, beat, mean_rr)
             labels.append(result.label)
+            confidences.append(max(result.probabilities.values()) if result.probabilities else None)
+            feature_vectors.append(fv)
             classifier_sources.add(result.source)
         # rr_flagged beats (physiologically-implausible RR, e.g. a missed R-peak
         # across a noisy/rejected stretch) are excluded here, same as
@@ -2700,6 +2913,7 @@ class ECGPipeline:
             n_beats_rejected=n_rejected, beat_labels=labels, embeddings=embeddings,
             rhythm_findings=rhythm_findings, risk_report=risk_report, temporal_trend=trend,
             merged_decision=merged, audit=audit,
+            beat_confidences=confidences, beat_feature_vectors=feature_vectors,
         )
 
     def _insufficient_data_result(self, recording: Recording, keep_mask: np.ndarray,
@@ -2734,7 +2948,7 @@ class ECGPipeline:
 
 Usage:
     python -m ecg_pipeline.ecg_pipeline_core --source vitalpatch --limit 3
-    python -m ecg_pipeline.ecg_pipeline_core --source sensio --limit 3
+    python -m ecg_pipeline.ecg_pipeline_core --source prorhythm --limit 3
 """
 
 
@@ -2770,7 +2984,7 @@ def summarize(result) -> dict:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source", choices=["vitalpatch", "sensio"], default="vitalpatch")
+    parser.add_argument("--source", choices=["vitalpatch", "prorhythm"], default="vitalpatch")
     parser.add_argument("--limit", type=int, default=2)
     parser.add_argument("--encoder", type=Path, default=MODELS_DIR / "ecg_encoder.pt")
     parser.add_argument("--classifier", type=Path, default=MODELS_DIR / "five_class_xgb.json")
@@ -2807,8 +3021,8 @@ def main():
         files = discover_vitalpatch_files(DATA_RAW / "vitalpatch")[:args.limit]
         recordings = [r for f in files for r in parse_vitalpatch_ecg(f)]
     else:
-        files = discover_sensio_files(DATA_RAW / "sense_io")[:args.limit]
-        recordings = [parse_sensio_ecg(f) for f in files]
+        files = discover_prorhythm_files(DATA_RAW / "sense_io")[:args.limit]
+        recordings = [parse_prorhythm_ecg(f) for f in files]
 
     for rec in recordings:
         result = pipeline.run(rec)
@@ -2818,3 +3032,10 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# Backward-compatible alias -- see ecg_inference/preprocess.py for the
+# rename rationale (device Bluetooth name 'SeNSiO' -> study name
+# 'prorhythm', matching data/raw/prorhythm/ and batch_prorhythm_report.py).
+parse_sensio_ecg = parse_prorhythm_ecg
+discover_sensio_files = discover_prorhythm_files

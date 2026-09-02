@@ -1,9 +1,15 @@
 # Questions for the ProRhythm patch team
 
-**Short answer to "do we need to clarify things before building?": YES — three
-of these block work, and two of them cannot be answered by us at any cost.**
+**Short answer to "do we need to clarify things before building?": YES — four
+of these block work, and three of them cannot be answered by us at any cost.**
 
-Ordered by how much each unblocks. Q1–Q3 are blocking. Q4–Q8 are useful.
+Ordered by how much each unblocks. Q1–Q4 are blocking. Q5–Q9 are useful.
+
+> **Updated 2026-09-02.** The lead configuration is now **confirmed as Lead
+> II** — thank you. Q1 has been narrowed to the half that remains open, which
+> is whether a **second** lead can be made available; that is now our
+> highest-value question. Q4 is new: the sample rate we receive changed from
+> ~89.5 Hz to 133.83 Hz, and we need to understand why.
 
 > Rhythm regularity indicator. Not a diagnosis. Not validated for clinical use.
 > Cannot distinguish atrial fibrillation from other causes of irregularity.
@@ -12,33 +18,59 @@ Ordered by how much each unblocks. Q1–Q3 are blocking. Q4–Q8 are useful.
 
 ## BLOCKING
 
-### Q1. Which lead does `ecg_clean` carry — and is a second lead available?
+### Q1. Is a second lead available in **any** mode or firmware configuration?
 
-**What we know:** the patch has **3 electrodes (RA, LA, LL)** producing a
-**2-lead ECG**. Every file we hold has **one** amplitude channel, and the live
-packet has **one** `ecg_clean` array.
+> **UPDATED 2026-09-02.** The original Q1 asked two things: *which* lead we
+> receive, and *whether a second* is available. **The first is now answered —
+> `ecg_clean` is Lead II, confirmed, on both the raw and clean paths.** That
+> closes the like-for-like question against the reference database (MITDB's
+> MLII), and retroactively validates our detector comparison.
+>
+> **The second half is not answered, and it is the more important half.** It is
+> restated below as the whole of Q1.
 
-**What we need:**
-- Does `ecg_clean` carry one channel or two? If two, how are they structured —
-  interleaved, second array, second key?
-- If one, **which lead is it — I, II or III?**
-- If a second lead exists at device or app level, where is it dropped?
-- Is 89.7 Hz **per channel**, or shared across two (~45 Hz each)?
+**The question, precisely:** can the patch deliver a **second, physically
+independent lead** — in the current firmware, in any other mode, in a
+diagnostic or engineering configuration, or in a build you could produce? We
+are not asking only about the mode we are running today.
 
-**Why it blocks:**
+Supporting details we still need if the answer is yes:
 
-1. We validated our beat detector against **modified Lead II** in the reference
-   database, assuming the patch streams Lead II. **If it streams Lead I, that
-   comparison is not like-for-like** — Lead I has a smaller R-wave in most
-   people, which would partly explain why detection performs worse on patch data.
-2. Waveform-shape analysis is **lead-dependent by definition**. It cannot be
-   applied to an unknown projection at all.
-3. **A second lead would attack our main blocker directly.** Our quality check
-   currently runs two *algorithms* on the *same* waveform, and it fails because
-   both make the same mistake on the same noise. Two *physically independent
-   leads* is a far stronger check — a real heartbeat appears in both, a movement
-   artefact usually does not. That is the standard way multi-lead systems
-   suppress exactly the false-beat problem we have.
+- How is it structured — interleaved in `ecg_clean`, a second array, a second key?
+- Which lead is it (I or III)?
+- Is the sample rate **per channel**, or shared across two channels?
+- If two leads exist at the device or app layer but only one reaches us, where
+  is the second dropped? Recovering it may need no firmware change at all.
+
+**Why this is the highest-value question we have.**
+
+Our beat detector finds **~4.4% too many beats** on patch data, and each false
+beat splits one RR interval into two, manufacturing irregularity. Our defence
+against this is a signal-quality gate built on **bSQI** — agreement between two
+independent R-peak detection *algorithms*. On device data that gate collapses,
+and the reason is structural:
+
+> **Two algorithms on one waveform fail together on the same noise. Two
+> physical leads do not.**
+
+Both detectors see the same motion artefact and agree on the same wrong peak,
+so bSQI stays high and the gate passes a window it should refuse. No change of
+algorithm fixes this, because the failure is *correlation between the two
+checks*, not the quality of either one. A second physically independent lead
+breaks that correlation: a real heartbeat appears in both leads, a movement
+artefact usually does not. That is the standard way multi-lead systems suppress
+precisely the false-beat problem that is blocking us.
+
+**And it is the only lever on this blocker that does not require Q2.**
+Everything else device-side waits on the controlled reference recording. This
+one could be answered from documentation today, and if a second lead is
+recoverable it would attack the over-detection using **data we already hold**.
+
+**A second reason it matters, from waveform work.** Morphology analysis is
+lead-dependent by definition. Lead II is now confirmed, which unblocks that in
+principle — but single-lead morphology cannot distinguish atrial from
+ventricular ectopy, and a second lead is what would make that separation
+approachable at all.
 
 ---
 
@@ -88,27 +120,81 @@ recording, so that recording captures it.
 
 ---
 
+### Q4. The sample rate changed. Was the previous loss known, and what changed?
+
+**NEW, 2026-09-02.** Every capture we hold from 2026-08-07 to 2026-08-20
+delivers **~89.5 Hz**. The session recorded on **2026-09-02 delivers 133.83
+Hz**, inside your stated 120–140 Hz band.
+
+`89.50 / 133.83 = 0.6688` — **two thirds**, to within our measurement scatter.
+The earlier captures were receiving **one sample in three fewer** than the
+device produced.
+
+We can tell you where it was *not* happening. Our clock-versus-count residual
+(elapsed time × rate, minus samples counted) has a median of **−1.8 samples
+over a 45-second window** across 1,210 windows. There was no timing
+discrepancy to find. So the loss happened **upstream of packet timestamping** —
+systematic 2:3 decimation somewhere in the device or app path, not Bluetooth
+packet loss, which would have left a clear trace.
+
+**What we need to know:**
+
+1. Was the 2:3 reduction **intentional** — a bandwidth or power mode?
+2. **What changed** between 2026-08-20 and 2026-09-02? A firmware update, an
+   app update, a configuration change, a different capture path?
+3. **Can the rate vary by mode, battery state, connection quality, or
+   subject?** This is the part that changes our engineering.
+4. Is 133.83 Hz **per channel**, or shared if a second channel is ever enabled?
+
+**Why it matters, and why it is blocking rather than useful.**
+
+The good news first: this did **not** corrupt our RR timing. We compute
+intervals as `Δindex / fs_local`, measuring the rate per window rather than
+assuming it, so 89.5 delivered samples still span one real second and the
+arithmetic cancelled. Our regularity threshold is likewise unaffected — the
+timing grid is a negligible term at the variability levels we work at.
+
+What it cost is **resolution**: 11.15 ms sample spacing instead of 7.47 ms, so
+a QRS complex spanned ~9 samples instead of ~13. Re-testing our detector at
+both rates on reference data shows the extra resolution does not broadly
+improve beat detection, but it **substantially rescues the cases where
+over-detection has gone catastrophic** — which is exactly our device failure
+mode.
+
+It is blocking because of question 3. **If the rate can vary, then measuring it
+per session is mandatory rather than defensive**, and any fixed-rate assumption
+anywhere in a downstream system is a latent fault. We would also need to treat
+our 37 historical captures as a permanently lower-resolution dataset, which we
+already do — they carry 89.5 Hz of information and we will not pretend
+otherwise.
+
+**One caveat on our side:** we have **one** session at 133.83 Hz. We are not
+treating it as the new normal until several more agree, and we would welcome
+confirmation of what the device is specified to deliver.
+
+---
+
 ## USEFUL, NOT BLOCKING
 
-### Q4. What are the amplitude units?
+### Q5. What are the amplitude units?
 
 Not mV — probably ADC counts. Every quality measure we use is scale-relative and
 the rhythm maths is timing-only, so this has never caused a problem. But it is
 an open item, and it would be needed for any absolute-amplitude work.
 
-### Q5. Where exactly are the electrodes placed on the torso?
+### Q6. Where exactly are the electrodes placed on the torso?
 
 A chest patch cannot reach the actual limbs, so RA/LA/LL are torso-placed
 equivalents. This affects how comparable the signal is to reference databases.
 
-### Q6. What filtering does the firmware apply?
+### Q7. What filtering does the firmware apply?
 
 The field is named `ecg_clean`, and we measured that adding a second filter
 chain leaves only **6–7% of the amplitude**. We therefore apply none. Knowing
 the actual passband would let us confirm this is the right call rather than an
 empirical one.
 
-### Q7. Is the WebSocket message schema stable?
+### Q8. Is the WebSocket message schema stable?
 
 We now parse the real schema (`ecg_clean: [{e, t}, ...]`). An earlier client
 assumed a different shape and, on a real packet, would have **connected
@@ -116,7 +202,7 @@ successfully, logged no error, and produced zero readings**. Our parser now
 refuses unrecognised packets rather than failing silently — but we should be
 told before the schema changes.
 
-### Q8. Can we get a recording from someone with a known abnormal rhythm?
+### Q9. Can we get a recording from someone with a known abnormal rhythm?
 
 Every one of our 37 patch recordings is from a healthy adult — **a single
 class**. A decision boundary cannot be derived from one class. Public data
@@ -131,11 +217,16 @@ separate ask from Q2.
 
 | # | Ask | Effort | Unblocks |
 |---|---|---|---|
-| **Q1** | Which lead(s) reach us | An answer | Waveform work; possibly the detector |
+| **Q1** | Is a **second lead** available, in any mode? | An answer | The over-detection blocker — using data we already hold |
 | **Q2** | One paired recording, ~1 hour | One person, one hour | **Everything device-side** |
 | **Q3** | Log `sNo` in captures | One line in the capture path | Measured replay and packet loss |
-| Q4–Q7 | Documentation answers | Low | Closes open items |
-| Q8 | An abnormal-rhythm recording | Needs clinical involvement | Device-side boundary derivation |
+| **Q4** | Why did the sample rate change, and can it vary? | An answer | Whether per-session rate measurement is mandatory |
+| Q5–Q8 | Documentation answers | Low | Closes open items |
+| Q9 | An abnormal-rhythm recording | Needs clinical involvement | Device-side boundary derivation |
 
 **If only one is possible, it is Q2.** It has been the rate-limiting item for the
 entire project.
+
+**If only one *answer* is possible — no recording, no logging, just a reply from
+someone who knows the hardware — it is Q1.** It costs you a sentence, and it is
+the only route to the over-detection problem that does not require new data.

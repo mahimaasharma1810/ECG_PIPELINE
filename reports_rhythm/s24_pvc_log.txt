@@ -1,0 +1,12 @@
+==========================================================================
+TASK 1 - L5 PVC morphology, held-out DATABASE
+==========================================================================
+PVC (V-class) only. PACs are NOT targeted: a PAC conducts normally so
+its QRS is near-identical to a sinus beat, and the discriminator is the
+P wave - small, often buried in the preceding T, unreliable single-lead.
+The prior attempt scored S-class F1 0.152 for this reason.
+
+
+==========================================================================
+NATIVE RESOLUTION
+==========================================================================

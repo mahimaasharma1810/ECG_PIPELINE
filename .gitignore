@@ -2,6 +2,15 @@
 # far too large for git (icentia11k alone is ~257GB).
 data/
 
+# Raw device captures from human subjects (~495MB). NEVER commit these: they
+# are unlabelled subject ECG recordings, not redistributable, and not source.
+# The derived per-window features in reports_rhythm/ ARE tracked.
+prorithm_ecg/
+
+# Bulk public-dataset archives staged for extraction. Kept on the SSD scratch,
+# never in the home quota and never in git.
+*.tar
+
 # Local Claude Code tool settings/session data, not project source.
 .claude/
 
@@ -34,3 +43,34 @@ __pycache__/
 
 # OS
 .DS_Store
+
+# ---------------------------------------------------------------------------
+# Rhythm pipeline (2026-08/09)
+# ---------------------------------------------------------------------------
+
+# Rendered SUBJECT ECG. These are pictures of a real person's waveform - raw
+# patient signal in image form - and are no more shareable than the CSV
+# captures in prorithm_ecg/. The GENERATORS are tracked
+# (scripts_rhythm/s09_strip.py, s12_generate_report.py), so any reviewer can
+# regenerate them locally from data they are already authorised to hold.
+reports_rhythm/**/*.png
+reports_rhythm/*.png
+
+# Per-beat and per-window intermediates from PUBLIC databases. ~38 MB, fully
+# regenerable by re-running the numbered script that produced each one. Tracking
+# them would permanently bloat history with derived data that carries no
+# information the summary tables do not already record.
+reports_rhythm/s10_ltafdb_windows.csv
+reports_rhythm/s22_trackb_train.csv
+reports_rhythm/s22_trackb_test.csv
+reports_rhythm/s23_burden_beats.csv
+reports_rhythm/s24_pvc_*.csv
+reports_rhythm/s25_burden_*.csv
+reports_rhythm/s29_beatfree_*.csv
+
+# Clinician review packages: contain the subject ECG images above.
+reports_rhythm/review_*/
+
+# GPU virtualenv lives on the SSD, never in the repo. See
+# docs/rhythm/GPU_ENVIRONMENT.md
+venv-gpu/

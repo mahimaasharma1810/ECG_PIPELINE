@@ -1804,3 +1804,88 @@ beats. A fixed-second window holds a variable number of intervals, so RR CV over
 5 s at 50 bpm (4 intervals) is not comparable to 5 s at 150 bpm (12 intervals).
 Fixed-beat keeps the statistic comparable across rates, which matters because
 rate and regularity are separate axes here.
+
+
+---
+
+# PART IX — Waveform + timing fusion: the waveform adds nothing (2026-09-02)
+
+`BUILD_RHYTHM_MODEL.md` step 6 recommends a waveform + timing fusion model
+(1D CNN on the waveform, RR features as side input). Built and tested on GPU.
+**The recommendation is not supported by measurement.**
+
+## 55. The ablation
+
+Trained on LTAFDB (20,331 windows, 15 records), tested on MITDB (1,154 windows,
+43 records) — held-out DATABASE. Identical windows and splits across arms.
+
+| Arm | Held-out MITDB AUC |
+|---|---|
+| RR features only | **0.9865** |
+| Waveform only | 0.9206 |
+| **Fusion (waveform + RR)** | **0.9633** |
+| Track A threshold (RR CV >= 0.1275) | 0.9511 |
+| **Track B gradient boosting, RR only** | **0.9957** |
+
+**Fusion is WORSE than RR alone** (-0.0232). The waveform branch does not merely
+fail to contribute - it drags the fused model below the RR-only arm, which is
+what an uninformative input that the model overfits looks like.
+
+And the neural RR arm (0.9865) still loses to plain gradient boosting (0.9957).
+
+**Interpretation:** rhythm IS timing. For a regularity target the information
+lives entirely in the RR intervals, and the waveform contributes noise. This is
+consistent with the project's founding premise - a morphology-free rhythm
+indicator - and it is now measured rather than assumed.
+
+**Decision: no CNN. The deterministic threshold plus Track B stands.**
+
+## 56. Design choices that made the test fair
+
+**The rate confound was made structurally impossible.** Windows are 64 BEATS
+resampled to a fixed 2048 samples, so 64 beats at 50 bpm and at 150 bpm produce
+identical array lengths - beat rate is not recoverable from the waveform input.
+The RR side input is rate-normalised by construction. Neither branch could learn
+"fast means irregular" (the cohort artefact measured at AUC 0.9221).
+
+**The device signal path was simulated**, not just the sample rate: public data
+was resampled to the native 133.83 Hz and then 2:3 decimated to the delivered
+89.70 Hz. The decimation is SYSTEMATIC, as measured - the distinction matters,
+since systematic decimation leaves RR CV essentially unchanged (0.0485 ->
+0.0490) whereas random loss doubles it (0.1008).
+
+**No filtering**, matching the device path and the device team's own filter
+document.
+
+## 57. Lead caveat on this result
+
+Our standard requires lead verification wherever the WAVEFORM is processed.
+LTAFDB headers name both channels `ECG` and do not identify the lead, so the
+`wave` branch trained on an UNVERIFIED lead. The `rr` arm has no lead dependence
+and is the control.
+
+Because the waveform added nothing, the caveat is moot for this conclusion - but
+it would have to be resolved before any positive waveform result could be
+believed. The TEST side (MITDB) is verified MLII, and the device is confirmed
+Lead II.
+
+## 58. Data integrity issue found
+
+LTAFDB record **110** has a truncated `.dat` (7.0 MB of an expected 44 MB, 16%).
+Annotation-only work is unaffected - Track A, Track B and every RR result read
+`.atr`, which is complete. The truncation only surfaced when waveforms were
+first read. The earlier "16 complete records" check verified file EXISTENCE, not
+completeness. 15 of 16 records have usable waveforms.
+
+## 59. GPU environment
+
+torch 2.5.1+cu121 on `/ssd_scratch/mahimakopalley/venv-gpu`, GTX 1080 Ti
+(sm_61), 8,281 GFLOP/s measured. See `GPU_ENVIRONMENT.md`. Note that sm_61 is
+absent from the build's arch list yet kernels run - verified by execution, not
+by `torch.cuda.is_available()`, which returns True before any kernel has run.
+
+## 60. Unchanged
+
+**Everything in Part IX is public data.** The device blocker - beat detection
+wrong by ~4.4%, needing the controlled recording - is untouched. Confirming
+Lead II removed the lead blocker from morphology work; it did not remove that one.

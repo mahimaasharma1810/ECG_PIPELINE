@@ -1,5 +1,10 @@
 # The ProRhythm / SeNSiO Patch and Its Data
 
+> **UPDATE 2026-09-02 — see `PATCH_TEAM_ANSWERS.md`.** The patch team confirmed
+> **Lead II** for both raw and clean, and a native sampling rate of
+> **120–140 Hz**. The historical captures' 89.70 Hz is a DELIVERY rate. Their
+> filter document also confirms no additional filtering is needed.
+
 Everything known about the device and the data it produces. Every number here
 was measured on the 37 captures we hold, unless marked otherwise.
 
@@ -24,7 +29,7 @@ was measured on the 37 captures we hold, unless marked otherwise.
 | Device | ProRhythm / SeNSiO wearable patch | CONFIRMED |
 | Electrodes | **3 — RA, LA, LL** | **CONFIRMED (device team, 2026-08-30)** |
 | Output | **2-lead ECG** | **CONFIRMED (device team, 2026-08-30)** |
-| Which lead(s) reach us | **UNKNOWN** | **OPEN — see §7** |
+| Which lead(s) reach us | **Lead II** (raw and clean) | **CONFIRMED (patch team, 2026-09-02)** |
 | Nominal sample rate | 100 Hz | device command parser default |
 | Amplitude units | **UNKNOWN** — not mV, probably ADC counts | UNCONFIRMED |
 | Firmware filtering | Yes — the data field is literally named `ecg_clean` | CONFIRMED |

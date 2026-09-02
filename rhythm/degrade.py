@@ -69,3 +69,4 @@ def resample_to(sig: np.ndarray, fs_in: float, fs_out: float = DEVICE_FS):
 def map_sample_indices(idx: np.ndarray, fs_in: float, fs_out: float) -> np.ndarray:
     """Map annotation sample indices from fs_in to the fs_out grid."""
     return np.round(np.asarray(idx, dtype=float) * (fs_out / fs_in)).astype(np.int64)
+

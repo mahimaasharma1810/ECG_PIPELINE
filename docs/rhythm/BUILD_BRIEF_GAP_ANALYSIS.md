@@ -37,7 +37,9 @@ unlabelled patch data, no AF claim, patient-level splits, held-out validation.
 ## 2. CONFLICT: "filter noise using light ECG bandpass"
 
 **Do not do this.** It is the one instruction in the brief that contradicts a
-measured result.
+measured result — **and the device team's own filter document agrees.** That
+document states the system "needed no additional filters to reject unwanted
+noises from hardware and the human body" (see `PATCH_TEAM_ANSWERS.md`).
 
 The device field is named `ecg_clean` because **the firmware already filters**.
 A second filter chain was measured to leave **6–7% of the signal amplitude**:
@@ -88,10 +90,10 @@ are to remove:
 1. **Device beat detection is wrong by ~4.4%.** A waveform model trained or run
    on windows aligned to wrong beat positions inherits that error. This is the
    same blocker as everything else device-side.
-2. **The lead configuration is OPEN.** The patch has 3 electrodes (RA, LA, LL)
-   giving a 2-lead ECG, and which lead reaches us is unresolved. Waveform shape
-   is lead-dependent — a CNN trained on modified-Lead-II data has no defined
-   relationship to an unknown projection.
+2. ~~The lead configuration is OPEN.~~ **RESOLVED 2026-09-02: Lead II,
+   confirmed by the patch team.** A CNN trained on modified-Lead-II reference
+   data now has a defined relationship to the device signal. This blocker is
+   removed.
 3. **Torch is CPU-only on this host** (`2.12.1+cpu`, `cuda=False`) despite a
    GTX 1080 Ti being present. A CUDA build is needed before CNN training is
    practical.

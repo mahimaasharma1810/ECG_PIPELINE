@@ -1,5 +1,9 @@
 # Questions for the ProRhythm patch team
 
+> **Q1 (lead) and Q4 (sample rate) were ANSWERED on 2026-09-02 —
+> see `PATCH_TEAM_ANSWERS.md`. Lead II confirmed, native rate 120–140 Hz.
+> Q2 (controlled recording) remains THE blocker.**
+
 **Short answer to "do we need to clarify things before building?": YES — four
 of these block work, and three of them cannot be answered by us at any cost.**
 

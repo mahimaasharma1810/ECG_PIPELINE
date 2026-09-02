@@ -2,6 +2,15 @@
 # far too large for git (icentia11k alone is ~257GB).
 data/
 
+# Raw device captures from human subjects (~495MB). NEVER commit these: they
+# are unlabelled subject ECG recordings, not redistributable, and not source.
+# The derived per-window features in reports_rhythm/ ARE tracked.
+prorithm_ecg/
+
+# Bulk public-dataset archives staged for extraction. Kept on the SSD scratch,
+# never in the home quota and never in git.
+*.tar
+
 # Local Claude Code tool settings/session data, not project source.
 .claude/
 

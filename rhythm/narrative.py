@@ -243,12 +243,26 @@ def generate(verdict: str, reason: str, evidence: dict, *,
     if not use_model:
         return NarrativeResult(template(verdict, reason, evidence), "template",
                                False, ("model not requested",), prompt)
+    if verdict == UNABLE:
+        # Measured empirically (2026-09, live device data): every MedGemma
+        # narrative attempted on an UNABLE_TO_DETERMINE window was rejected by
+        # validate() below -- the model tends to assert more than the evidence
+        # supports when the deterministic engine itself couldn't decide. That
+        # made every one of these windows pay the full ~9.8s Ollama call for a
+        # result that was always going to be discarded. Not a hard guarantee
+        # (a compliant "cannot be determined" reply is possible in principle),
+        # but skipping the call here trades a small, unproven chance of an
+        # accepted model narrative for a real, consistent latency win on the
+        # verdict this happens to fire most often.
+        return NarrativeResult(template(verdict, reason, evidence), "template",
+                               False, ("verdict is UNABLE_TO_DETERMINE -- model call skipped",), prompt)
     try:
         import urllib.request
         req = urllib.request.Request(
             OLLAMA_URL,
             data=json.dumps({"model": OLLAMA_MODEL, "prompt": prompt,
-                             "stream": False, "options": {"temperature": 0.1}}).encode(),
+                             "stream": False,
+                             "options": {"temperature": 0.1, "num_predict": 200}}).encode(),
             headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=timeout_s) as r:
             text = json.loads(r.read()).get("response", "").strip()
